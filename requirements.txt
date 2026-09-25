@@ -2,3 +2,6 @@ kokoro>=0.9.4
 soundfile
 transformers>=4.46
 sentencepiece
+chatterbox-tts
+torchaudio
+setuptools<81

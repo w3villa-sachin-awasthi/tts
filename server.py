@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local TTS app. Kokoro-82M stays on /api/speech. SpeechT5 is /api/speecht5."""
+"""Local TTS app. Kokoro, SpeechT5, and Chatterbox."""
 
 from __future__ import annotations
 
@@ -24,6 +24,9 @@ import soundfile as sf
 import torch
 from kokoro import KPipeline
 
+from chatterbox_engine import LANGUAGES as CHATTERBOX_LANGUAGES
+from chatterbox_engine import VOICES as CHATTERBOX_VOICES
+from chatterbox_engine import ChatterboxEngine
 from speecht5_engine import SPEAKERS, SpeechT5Engine
 
 LANGUAGES = [
@@ -131,12 +134,21 @@ DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
 pipelines: dict[str, KPipeline] = {}
 pipeline_lock = threading.Lock()
 speecht5 = SpeechT5Engine(DEVICE)
+chatterbox = ChatterboxEngine(DEVICE)
 SPEECHT5_LANG = [
     {
         "code": "en",
         "name": "English",
         "voices": [{"id": key, "label": label} for key, label in SPEAKERS],
     }
+]
+CHATTERBOX_LANG = [
+    {
+        "code": code,
+        "name": name,
+        "voices": [{"id": key, "label": label} for key, label in CHATTERBOX_VOICES],
+    }
+    for code, name in CHATTERBOX_LANGUAGES.items()
 ]
 MODELS = [
     {
@@ -152,6 +164,13 @@ MODELS = [
         "route": "/api/speecht5",
         "note": "English only. This checkpoint was trained on LibriTTS.",
         "languages": SPEECHT5_LANG,
+    },
+    {
+        "id": "chatterbox",
+        "name": "Chatterbox Multilingual",
+        "route": "/api/chatterbox",
+        "note": "23 languages. 500M model with emotion control. First run downloads weights.",
+        "languages": CHATTERBOX_LANG,
     },
 ]
 
@@ -300,6 +319,7 @@ PAGE = """<!DOCTYPE html>
     const samples = {
       kokoro: "Hello from Kokoro on this Mac.",
       speecht5: "Hello from SpeechT5 on this Mac.",
+      chatterbox: "Hello from Chatterbox on this Mac.",
     };
 
     function fillLanguages() {
@@ -325,8 +345,9 @@ PAGE = """<!DOCTYPE html>
       if (item.id === initial) option.selected = true;
       model.appendChild(option);
     }
+    const modelPaths = { kokoro: "/", speecht5: "/speecht5", chatterbox: "/chatterbox" };
     model.addEventListener("change", () => {
-      history.replaceState(null, "", model.value === "speecht5" ? "/speecht5" : "/");
+      history.replaceState(null, "", modelPaths[model.value] || "/");
       fillLanguages();
     });
     language.addEventListener("change", fillVoices);
@@ -403,6 +424,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/speecht5":
             self._send(200, render_page("speecht5"), "text/html; charset=utf-8")
             return
+        if path == "/chatterbox":
+            self._send(200, render_page("chatterbox"), "text/html; charset=utf-8")
+            return
         if path == "/api/models":
             payload = {
                 "device": DEVICE,
@@ -421,6 +445,13 @@ class Handler(BaseHTTPRequestHandler):
                         "sample_rate": 16000,
                         "languages": SPEECHT5_LANG,
                     },
+                    {
+                        "id": "chatterbox",
+                        "repo": "ResembleAI/chatterbox",
+                        "route": "/api/chatterbox",
+                        "sample_rate": 24000,
+                        "languages": CHATTERBOX_LANG,
+                    },
                 ],
             }
             self._send(200, json.dumps(payload).encode(), "application/json")
@@ -429,7 +460,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        if path not in ("/api/speech", "/api/speecht5"):
+        if path not in ("/api/speech", "/api/speecht5", "/api/chatterbox"):
             self._send(404, b"Not found", "text/plain; charset=utf-8")
             return
         length = int(self.headers.get("Content-Length", "0"))
@@ -447,6 +478,11 @@ class Handler(BaseHTTPRequestHandler):
                 voice = str(payload.get("voice") or "slt")
                 audio = speecht5.synthesize(text, voice)
                 filename = "speecht5.wav"
+            elif path == "/api/chatterbox":
+                voice = str(payload.get("voice") or "default")
+                lang = str(payload.get("language") or "en")
+                audio = chatterbox.synthesize(text, voice, language=lang)
+                filename = "chatterbox.wav"
             else:
                 voice = str(payload.get("voice") or "af_heart")
                 lang = str(payload.get("language") or VOICE_LANG.get(voice, "a"))
@@ -468,6 +504,7 @@ def main() -> None:
     pipeline_for("a")
     print(f"Kokoro: http://127.0.0.1:{UI_PORT}/", flush=True)
     print(f"SpeechT5: http://127.0.0.1:{UI_PORT}/speecht5", flush=True)
+    print(f"Chatterbox: http://127.0.0.1:{UI_PORT}/chatterbox", flush=True)
     ThreadingHTTPServer(("127.0.0.1", UI_PORT), Handler).serve_forever()
 
 
