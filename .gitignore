@@ -1,9 +1,9 @@
+# Local TTS — ignore runtime artifacts and per-model envs.
 models/
 output/
 __pycache__/
+*.pyc
 *.wav
 .DS_Store
 .venv/
-.venv-cosyvoice/
-.venv-indic-parler/
-.gitignore
+.venv-*/

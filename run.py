@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Launch exactly one TTS model server. Only that model's weights load.
+"""Launch exactly one TTS model server. Only that model's code and weights load.
 
 Usage:
-  python run.py kokoro
-  python run.py speecht5
-  python run.py chatterbox
-  python run.py cosyvoice
-  python run.py indic-parler
+  .venv/bin/python run.py kokoro
+  .venv/bin/python run.py speecht5
+  .venv/bin/python run.py chatterbox
+  .venv-cosyvoice/bin/python run.py cosyvoice
+  .venv-indic-parler/bin/python run.py indic-parler
 
-Stop the process (Ctrl+C) before starting a different model — all share port 8765.
+Stop with Ctrl+C before starting a different model (shared port 8765).
 """
 
 from __future__ import annotations
