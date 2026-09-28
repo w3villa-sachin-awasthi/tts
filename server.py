@@ -19,7 +19,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 MODEL_DIR = ROOT / "models" / "huggingface"
 MAGPIE_MODEL_DIR = ROOT / "models"
-NEMO = ROOT / "vendor" / "nemo-speech" / "bin" / "nemo-speech"
 OUTPUT_DIR = ROOT / "output"
 UI_HOST = os.environ.get("TTS_HOST", "127.0.0.1")
 UI_PORT = int(os.environ.get("TTS_PORT", "8765"))
@@ -222,6 +221,52 @@ def pipeline_for(lang: str) -> KPipeline:
     return pipelines[lang]
 
 
+def _native_binary(path: Path) -> bool:
+    if not path.is_file() or not os.access(path, os.X_OK):
+        return False
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(4)
+    except OSError:
+        return False
+    if sys.platform == "linux":
+        return header.startswith(b"\x7fELF")
+    if sys.platform == "darwin":
+        return header in (
+            b"\xfe\xed\xfa\xce",
+            b"\xce\xfa\xed\xfe",
+            b"\xfe\xed\xfa\xcf",
+            b"\xcf\xfa\xed\xfe",
+        )
+    return True
+
+
+def resolve_nemo_bin() -> Path | None:
+    override = os.environ.get("NEMO_SPEECH_BIN", "").strip()
+    if override:
+        path = Path(override)
+        return path if _native_binary(path) else None
+    for path in (
+        ROOT / "nemo-speech" / "bin" / "nemo-speech",
+        Path.home() / ".local" / "bin" / "nemo-speech",
+        ROOT / "vendor" / "nemo-speech" / "bin" / "nemo-speech",
+    ):
+        if _native_binary(path):
+            return path
+    return None
+
+
+def magpie_device() -> str:
+    override = os.environ.get("MAGPIE_DEVICE", "").strip().lower()
+    if override:
+        return override
+    if sys.platform == "darwin":
+        return "metal"
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
 def magpie_ready() -> bool:
     try:
         with urllib.request.urlopen(f"{MAGPIE_URL}/health", timeout=1) as response:
@@ -234,8 +279,14 @@ def start_magpie() -> None:
     global magpie_proc
     if magpie_ready():
         return
-    if not NEMO.is_file():
-        raise RuntimeError("NeMo-Speech.cpp is missing, so Magpie cannot start.")
+    nemo = resolve_nemo_bin()
+    if nemo is None:
+        raise RuntimeError(
+            "NeMo-Speech.cpp is not installed for this CPU/OS. "
+            "The vendor/ copy in git is macOS-only. On Jetson run: "
+            "bash scripts/jetson-install-nemo-speech.sh "
+            "then pm2 restart tts --update-env"
+        )
     with magpie_lock:
         if magpie_ready():
             return
@@ -246,7 +297,7 @@ def start_magpie() -> None:
             env["NEMO_SPEECH_MODEL_DIR"] = str(MAGPIE_MODEL_DIR)
             magpie_proc = subprocess.Popen(
                 [
-                    str(NEMO),
+                    str(nemo),
                     "serve",
                     "--host",
                     "127.0.0.1",
@@ -255,7 +306,7 @@ def start_magpie() -> None:
                     "--tts-model",
                     "magpie",
                     "--device",
-                    "metal",
+                    magpie_device(),
                     "--no-ui",
                     "--tts.voice-name",
                     "Sofia",
