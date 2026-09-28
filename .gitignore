@@ -1,6 +1,7 @@
 # Local TTS — ignore runtime artifacts and per-model envs.
 models/
 output/
+voices/
 __pycache__/
 *.pyc
 *.wav

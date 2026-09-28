@@ -5,6 +5,7 @@ Usage:
   .venv/bin/python run.py kokoro
   .venv/bin/python run.py speecht5
   .venv/bin/python run.py chatterbox
+  .venv/bin/python run.py chatterbox-turbo
   .venv-cosyvoice/bin/python run.py cosyvoice
   .venv-indic-parler/bin/python run.py indic-parler
 
@@ -24,6 +25,7 @@ MODELS = {
     "kokoro": "server_kokoro.py",
     "speecht5": "server_speecht5.py",
     "chatterbox": "server_chatterbox.py",
+    "chatterbox-turbo": "server_chatterbox_turbo.py",
     "cosyvoice": "server_cosyvoice.py",
     "indic-parler": "server_indic_parler.py",
 }

@@ -1,10 +1,10 @@
-# Shared base for Kokoro, SpeechT5, Chatterbox.
+# Shared base for Kokoro, SpeechT5, Chatterbox, Chatterbox-Turbo.
 # CosyVoice:     pip install -r requirements-cosyvoice.txt  (use .venv-cosyvoice recommended)
 # Indic Parler:  pip install -r requirements-indic-parler.txt (use .venv-indic-parler recommended)
 kokoro>=0.9.4
 soundfile
 transformers>=4.46
 sentencepiece
-chatterbox-tts
+chatterbox-tts>=0.1.7
 torchaudio
 setuptools<81
