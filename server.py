@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
-"""Local TTS app. Kokoro-82M stays on /api/speech. SpeechT5 is /api/speecht5."""
+"""Local TTS app. Kokoro, SpeechT5, and Magpie each have their own route."""
 
 from __future__ import annotations
 
+import atexit
 import io
 import json
 import os
+import subprocess
 import sys
 import threading
+import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 MODEL_DIR = ROOT / "models" / "huggingface"
+MAGPIE_MODEL_DIR = ROOT / "models"
+NEMO = ROOT / "vendor" / "nemo-speech" / "bin" / "nemo-speech"
 OUTPUT_DIR = ROOT / "output"
-UI_PORT = 8765
+UI_HOST = os.environ.get("TTS_HOST", "127.0.0.1")
+UI_PORT = int(os.environ.get("TTS_PORT", "8765"))
+MAGPIE_PORT = 8091
+MAGPIE_URL = f"http://127.0.0.1:{MAGPIE_PORT}"
 
 os.environ.setdefault("HF_HOME", str(MODEL_DIR))
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
@@ -24,7 +34,12 @@ import soundfile as sf
 import torch
 from kokoro import KPipeline
 
+from piper_engine import VOICES as PIPER_VOICES
+from piper_engine import PiperEngine
 from speecht5_engine import SPEAKERS, SpeechT5Engine
+from voice_chat import turn_response
+
+VOICE_CHAT_PAGE = (ROOT / "voice_chat.html").read_text(encoding="utf-8")
 
 LANGUAGES = [
     (
@@ -127,7 +142,12 @@ VOICE_LANG = {
     voice["id"]: item["code"] for item in CATALOG for voice in item["voices"]
 }
 
-DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
+if torch.cuda.is_available():
+    DEVICE = "cuda"
+elif torch.backends.mps.is_available():
+    DEVICE = "mps"
+else:
+    DEVICE = "cpu"
 pipelines: dict[str, KPipeline] = {}
 pipeline_lock = threading.Lock()
 speecht5 = SpeechT5Engine(DEVICE)
@@ -138,6 +158,29 @@ SPEECHT5_LANG = [
         "voices": [{"id": key, "label": label} for key, label in SPEAKERS],
     }
 ]
+MAGPIE_VOICES = [
+    {"id": name, "label": name} for name in ("Aria", "Jason", "John", "Leo", "Sofia")
+]
+MAGPIE_LANG = [
+    {"code": code, "name": name, "voices": MAGPIE_VOICES}
+    for code, name in (
+        ("en-US", "English"),
+        ("es-ES", "Spanish"),
+        ("de-DE", "German"),
+        ("fr-FR", "French"),
+        ("it-IT", "Italian"),
+        ("vi-VN", "Vietnamese"),
+        ("hi-IN", "Hindi"),
+    )
+]
+PIPER_LANG = []
+for code, name, voice_id, label in PIPER_VOICES:
+    match = next((item for item in PIPER_LANG if item["code"] == code), None)
+    if match is None:
+        match = {"code": code, "name": name, "voices": []}
+        PIPER_LANG.append(match)
+    match["voices"].append({"id": voice_id, "label": label})
+
 MODELS = [
     {
         "id": "kokoro",
@@ -153,13 +196,118 @@ MODELS = [
         "note": "English only. This checkpoint was trained on LibriTTS.",
         "languages": SPEECHT5_LANG,
     },
+    {
+        "id": "magpie",
+        "name": "Magpie TTS 357M",
+        "route": "/api/magpie",
+        "note": "357 million parameters, not billion. v2602 on the M2 GPU.",
+        "languages": MAGPIE_LANG,
+    },
+    {
+        "id": "piper",
+        "name": "Piper ~20M",
+        "route": "/api/piper",
+        "note": "Medium Piper voices, about 15–20 million parameters each.",
+        "languages": PIPER_LANG,
+    },
 ]
+piper = PiperEngine(ROOT / "models" / "piper")
+magpie_proc: subprocess.Popen | None = None
+magpie_lock = threading.Lock()
 
 
 def pipeline_for(lang: str) -> KPipeline:
     if lang not in pipelines:
         pipelines[lang] = KPipeline(lang_code=lang, device=DEVICE)
     return pipelines[lang]
+
+
+def magpie_ready() -> bool:
+    try:
+        with urllib.request.urlopen(f"{MAGPIE_URL}/health", timeout=1) as response:
+            return response.status == 200
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return False
+
+
+def start_magpie() -> None:
+    global magpie_proc
+    if magpie_ready():
+        return
+    if not NEMO.is_file():
+        raise RuntimeError("NeMo-Speech.cpp is missing, so Magpie cannot start.")
+    with magpie_lock:
+        if magpie_ready():
+            return
+        if magpie_proc and magpie_proc.poll() is None:
+            pass
+        else:
+            env = os.environ.copy()
+            env["NEMO_SPEECH_MODEL_DIR"] = str(MAGPIE_MODEL_DIR)
+            magpie_proc = subprocess.Popen(
+                [
+                    str(NEMO),
+                    "serve",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(MAGPIE_PORT),
+                    "--tts-model",
+                    "magpie",
+                    "--device",
+                    "metal",
+                    "--no-ui",
+                    "--tts.voice-name",
+                    "Sofia",
+                ],
+                cwd=ROOT,
+                env=env,
+            )
+        deadline = time.time() + 180
+        while time.time() < deadline:
+            if magpie_proc and magpie_proc.poll() is not None:
+                raise RuntimeError(f"Magpie exited with code {magpie_proc.returncode}")
+            if magpie_ready():
+                return
+            time.sleep(0.4)
+        raise RuntimeError("Magpie did not become ready.")
+
+
+def stop_magpie() -> None:
+    if magpie_proc and magpie_proc.poll() is None:
+        magpie_proc.terminate()
+
+
+atexit.register(stop_magpie)
+
+
+def synthesize_magpie(text: str, voice: str, lang: str) -> bytes:
+    if voice not in {item["id"] for item in MAGPIE_VOICES}:
+        raise ValueError("Unknown Magpie voice.")
+    if lang not in {item["code"] for item in MAGPIE_LANG}:
+        raise ValueError("That language is not in this Magpie build.")
+    start_magpie()
+    body = json.dumps(
+        {
+            "model": "magpie",
+            "input": text,
+            "voice": voice,
+            "language": lang,
+            "response_format": "wav",
+        }
+    ).encode()
+    request = urllib.request.Request(
+        f"{MAGPIE_URL}/v1/audio/speech",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")
+        raise RuntimeError(detail or exc.reason) from exc
 
 
 def synthesize(text: str, voice: str, lang: str) -> bytes:
@@ -300,7 +448,10 @@ PAGE = """<!DOCTYPE html>
     const samples = {
       kokoro: "Hello from Kokoro on this Mac.",
       speecht5: "Hello from SpeechT5 on this Mac.",
+      magpie: "Hello from Magpie on this Mac.",
+      piper: "Hello from Piper on this Mac.",
     };
+    const paths = { kokoro: "/", speecht5: "/speecht5", magpie: "/magpie", piper: "/piper" };
 
     function fillLanguages() {
       const chosen = currentModel();
@@ -326,7 +477,7 @@ PAGE = """<!DOCTYPE html>
       model.appendChild(option);
     }
     model.addEventListener("change", () => {
-      history.replaceState(null, "", model.value === "speecht5" ? "/speecht5" : "/");
+      history.replaceState(null, "", paths[model.value] || "/");
       fillLanguages();
     });
     language.addEventListener("change", fillVoices);
@@ -403,6 +554,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/speecht5":
             self._send(200, render_page("speecht5"), "text/html; charset=utf-8")
             return
+        if path == "/magpie":
+            self._send(200, render_page("magpie"), "text/html; charset=utf-8")
+            return
+        if path == "/piper":
+            self._send(200, render_page("piper"), "text/html; charset=utf-8")
+            return
+        if path == "/voice-chat":
+            self._send(200, VOICE_CHAT_PAGE.encode(), "text/html; charset=utf-8")
+            return
         if path == "/api/models":
             payload = {
                 "device": DEVICE,
@@ -421,6 +581,20 @@ class Handler(BaseHTTPRequestHandler):
                         "sample_rate": 16000,
                         "languages": SPEECHT5_LANG,
                     },
+                    {
+                        "id": "magpie",
+                        "repo": "nvidia/magpie_tts_multilingual_357m",
+                        "route": "/api/magpie",
+                        "sample_rate": 22050,
+                        "languages": MAGPIE_LANG,
+                    },
+                    {
+                        "id": "piper",
+                        "repo": "rhasspy/piper-voices",
+                        "route": "/api/piper",
+                        "sample_rate": 22050,
+                        "languages": PIPER_LANG,
+                    },
                 ],
             }
             self._send(200, json.dumps(payload).encode(), "application/json")
@@ -429,10 +603,34 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        if path not in ("/api/speech", "/api/speecht5"):
+        length = int(self.headers.get("Content-Length", "0"))
+        if path == "/api/voice-chat/turn":
+            try:
+                payload = json.loads(self.rfile.read(length).decode())
+            except json.JSONDecodeError:
+                self._send(400, b"Invalid JSON", "text/plain; charset=utf-8")
+                return
+            user_text = str(payload.get("user_text", "")).strip()
+            voice = str(payload.get("voice") or "en_US-lessac-medium")
+            history = payload.get("messages") or []
+            if not isinstance(history, list):
+                self._send(400, b"messages must be a list", "text/plain; charset=utf-8")
+                return
+            ollama_model = payload.get("ollama_model")
+            if ollama_model is not None:
+                ollama_model = str(ollama_model).strip() or None
+            try:
+                result = turn_response(
+                    history, user_text, voice, piper, ollama_model=ollama_model
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+                return
+            self._send(200, json.dumps(result).encode(), "application/json")
+            return
+        if path not in ("/api/speech", "/api/speecht5", "/api/magpie", "/api/piper"):
             self._send(404, b"Not found", "text/plain; charset=utf-8")
             return
-        length = int(self.headers.get("Content-Length", "0"))
         try:
             payload = json.loads(self.rfile.read(length).decode())
         except json.JSONDecodeError:
@@ -447,6 +645,15 @@ class Handler(BaseHTTPRequestHandler):
                 voice = str(payload.get("voice") or "slt")
                 audio = speecht5.synthesize(text, voice)
                 filename = "speecht5.wav"
+            elif path == "/api/magpie":
+                voice = str(payload.get("voice") or "Sofia")
+                lang = str(payload.get("language") or "en-US")
+                audio = synthesize_magpie(text, voice, lang)
+                filename = "magpie.wav"
+            elif path == "/api/piper":
+                voice = str(payload.get("voice") or "en_US-lessac-medium")
+                audio = piper.synthesize(text, voice)
+                filename = "piper.wav"
             else:
                 voice = str(payload.get("voice") or "af_heart")
                 lang = str(payload.get("language") or VOICE_LANG.get(voice, "a"))
@@ -466,9 +673,14 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     print(f"Loading Kokoro-82M on {DEVICE}…", flush=True)
     pipeline_for("a")
-    print(f"Kokoro: http://127.0.0.1:{UI_PORT}/", flush=True)
-    print(f"SpeechT5: http://127.0.0.1:{UI_PORT}/speecht5", flush=True)
-    ThreadingHTTPServer(("127.0.0.1", UI_PORT), Handler).serve_forever()
+    base = f"http://{UI_HOST}:{UI_PORT}" if UI_HOST not in ("0.0.0.0", "::") else f"http://127.0.0.1:{UI_PORT}"
+    print(f"Listening on {UI_HOST}:{UI_PORT}", flush=True)
+    print(f"Kokoro: {base}/", flush=True)
+    print(f"SpeechT5: {base}/speecht5", flush=True)
+    print(f"Magpie: {base}/magpie", flush=True)
+    print(f"Piper: {base}/piper", flush=True)
+    print(f"Voice chat: {base}/voice-chat", flush=True)
+    ThreadingHTTPServer((UI_HOST, UI_PORT), Handler).serve_forever()
 
 
 if __name__ == "__main__":
