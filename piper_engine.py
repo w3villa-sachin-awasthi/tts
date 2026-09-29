@@ -63,15 +63,19 @@ class PiperEngine:
             self.loaded[voice_id] = PiperVoice.load(self._onnx_path(voice_id))
         return self.loaded[voice_id]
 
-    def synthesize(self, text: str, voice_id: str) -> bytes:
+    def iter_synthesize(self, text: str, voice_id: str):
         with self.lock:
-            chunks = []
-            sample_rate = SAMPLE_RATE
             for chunk in self.voice(voice_id).synthesize(text):
                 audio = np.asarray(chunk.audio_float_array, dtype=np.float32)
                 if audio.size:
-                    chunks.append(audio)
-                    sample_rate = chunk.sample_rate
+                    yield audio, chunk.sample_rate
+
+    def synthesize(self, text: str, voice_id: str) -> bytes:
+        chunks = []
+        sample_rate = SAMPLE_RATE
+        for audio, rate in self.iter_synthesize(text, voice_id):
+            chunks.append(audio)
+            sample_rate = rate
         if not chunks:
             raise RuntimeError("Piper returned no audio.")
         buffer = io.BytesIO()

@@ -36,6 +36,7 @@ from kokoro import KPipeline
 from piper_engine import VOICES as PIPER_VOICES
 from piper_engine import PiperEngine
 from speecht5_engine import SPEAKERS, SpeechT5Engine
+from tts_stream import stream_kokoro, stream_piper
 from voice_chat import turn_response
 
 VOICE_CHAT_PAGE = (ROOT / "voice_chat.html").read_text(encoding="utf-8")
@@ -186,6 +187,7 @@ MODELS = [
         "name": "Kokoro-82M",
         "route": "/api/speech",
         "note": "Multilingual. The voice has to match the language.",
+        "streaming": True,
         "languages": CATALOG,
     },
     {
@@ -207,6 +209,7 @@ MODELS = [
         "name": "Piper ~20M",
         "route": "/api/piper",
         "note": "Medium Piper voices, about 15–20 million parameters each.",
+        "streaming": True,
         "languages": PIPER_LANG,
     },
 ]
@@ -459,6 +462,9 @@ PAGE = """<!DOCTYPE html>
           <select id="voice"></select>
         </div>
       </div>
+      <label style="display:block;margin-top:12px;font-size:0.9rem;">
+        <input type="checkbox" id="stream" /> Stream audio (Kokoro &amp; Piper only)
+      </label>
       <button id="speak" type="submit">Speak</button>
       <div id="status" class="status"></div>
     </form>
@@ -477,8 +483,11 @@ PAGE = """<!DOCTYPE html>
     const result = document.getElementById("result");
     const player = document.getElementById("player");
     const button = document.getElementById("speak");
+    const streamBox = document.getElementById("stream");
     const title = document.getElementById("title");
     const lead = document.getElementById("lead");
+    let streamCtx = null;
+    let streamNextTime = 0;
 
     function currentModel() {
       return models.find((item) => item.id === model.value) || models[0];
@@ -504,10 +513,71 @@ PAGE = """<!DOCTYPE html>
     };
     const paths = { kokoro: "/", speecht5: "/speecht5", magpie: "/magpie", piper: "/piper" };
 
+    function syncStreamToggle() {
+      const canStream = !!currentModel().streaming;
+      streamBox.disabled = !canStream;
+      streamBox.parentElement.style.opacity = canStream ? "1" : "0.5";
+      if (!canStream) streamBox.checked = false;
+    }
+
+    function parseSseBlock(block) {
+      let event = "message";
+      let data = "";
+      for (const line of block.split("\\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        if (line.startsWith("data:")) data = line.slice(5).trim();
+      }
+      return { event, data: data ? JSON.parse(data) : {} };
+    }
+
+    async function playStreamingResponse(response) {
+      if (streamCtx) {
+        await streamCtx.close();
+        streamCtx = null;
+      }
+      streamCtx = new AudioContext();
+      streamNextTime = streamCtx.currentTime;
+      let sampleRate = 24000;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let pending = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        pending += decoder.decode(value, { stream: true });
+        let split;
+        while ((split = pending.indexOf("\\n\\n")) >= 0) {
+          const raw = pending.slice(0, split);
+          pending = pending.slice(split + 2);
+          const { event, data } = parseSseBlock(raw);
+          if (event === "meta" && data.sample_rate) sampleRate = data.sample_rate;
+          if (event === "error") throw new Error(data.message || "Stream error");
+          if (event === "chunk" && data.b64) {
+            const rate = data.sample_rate || sampleRate;
+            const binary = atob(data.b64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            const floats = new Float32Array(bytes.buffer);
+            const buffer = streamCtx.createBuffer(1, floats.length, rate);
+            buffer.copyToChannel(floats, 0);
+            const source = streamCtx.createBufferSource();
+            source.buffer = buffer;
+            source.connect(streamCtx.destination);
+            const start = Math.max(streamNextTime, streamCtx.currentTime);
+            source.start(start);
+            streamNextTime = start + buffer.duration;
+          }
+        }
+      }
+      result.classList.add("show");
+      player.removeAttribute("src");
+    }
+
     function fillLanguages() {
       const chosen = currentModel();
       title.textContent = chosen.name;
       lead.textContent = chosen.note;
+      syncStreamToggle();
       const text = document.getElementById("text");
       if (Object.values(samples).includes(text.value)) text.value = samples[chosen.id];
       language.replaceChildren();
@@ -544,7 +614,8 @@ PAGE = """<!DOCTYPE html>
       }
       button.disabled = true;
       status.className = "status";
-      status.textContent = "Synthesizing…";
+      const useStream = streamBox.checked && currentModel().streaming;
+      status.textContent = useStream ? "Streaming…" : "Synthesizing…";
       try {
         const chosen = currentModel();
         const response = await fetch(chosen.route, {
@@ -554,18 +625,24 @@ PAGE = """<!DOCTYPE html>
             input: text,
             voice: voice.value,
             language: language.value,
+            stream: useStream,
           }),
         });
         if (!response.ok) {
           const detail = await response.text();
           throw new Error(detail || response.statusText);
         }
-        const blob = await response.blob();
-        if (player.src.startsWith("blob:")) URL.revokeObjectURL(player.src);
-        player.src = URL.createObjectURL(blob);
-        result.classList.add("show");
-        await player.play();
-        status.textContent = "Ready.";
+        if (useStream) {
+          await playStreamingResponse(response);
+          status.textContent = "Stream finished.";
+        } else {
+          const blob = await response.blob();
+          if (player.src.startsWith("blob:")) URL.revokeObjectURL(player.src);
+          player.src = URL.createObjectURL(blob);
+          result.classList.add("show");
+          await player.play();
+          status.textContent = "Ready.";
+        }
       } catch (error) {
         status.textContent = error.message || "Synthesis failed.";
         status.className = "status error";
@@ -597,6 +674,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_sse(self, chunks) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        for block in chunks:
+            self.wfile.write(block)
+            self.wfile.flush()
+
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html", "/kokoro"):
@@ -623,6 +710,7 @@ class Handler(BaseHTTPRequestHandler):
                         "repo": "hexgrad/Kokoro-82M",
                         "route": "/api/speech",
                         "sample_rate": 24000,
+                        "streaming": True,
                         "languages": CATALOG,
                     },
                     {
@@ -644,6 +732,7 @@ class Handler(BaseHTTPRequestHandler):
                         "repo": "rhasspy/piper-voices",
                         "route": "/api/piper",
                         "sample_rate": 22050,
+                        "streaming": True,
                         "languages": PIPER_LANG,
                     },
                 ],
@@ -690,6 +779,33 @@ class Handler(BaseHTTPRequestHandler):
         text = str(payload.get("input", "")).strip()
         if not text:
             self._send(400, b"Text is required", "text/plain; charset=utf-8")
+            return
+        want_stream = bool(payload.get("stream"))
+        if want_stream and path not in ("/api/speech", "/api/piper"):
+            self._send(
+                400,
+                b"Streaming is only supported for Kokoro (/api/speech) and Piper (/api/piper).",
+                "text/plain; charset=utf-8",
+            )
+            return
+        if want_stream and path == "/api/piper":
+            voice = str(payload.get("voice") or "en_US-lessac-medium")
+            try:
+                self._send_sse(stream_piper(text, voice, piper))
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+            return
+        if want_stream:
+            voice = str(payload.get("voice") or "af_heart")
+            lang = str(payload.get("language") or VOICE_LANG.get(voice, "a"))
+            try:
+                self._send_sse(
+                    stream_kokoro(
+                        text, voice, lang, pipeline_for, pipeline_lock, VOICE_LANG
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
             return
         try:
             if path == "/api/speecht5":
