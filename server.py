@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local TTS app. Kokoro, SpeechT5, and Magpie each have their own route."""
+"""Local TTS app. One ACTIVE_TTS_MODEL in RAM; all engines may remain on disk."""
 
 from __future__ import annotations
 
@@ -17,6 +17,26 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+
+
+def _load_dotenv() -> None:
+    """Optional /data/tts/.env without requiring python-dotenv."""
+    path = ROOT / ".env"
+    if not path.is_file():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv()
+
 MODEL_DIR = ROOT / "models" / "huggingface"
 MAGPIE_MODEL_DIR = ROOT / "models"
 OUTPUT_DIR = ROOT / "output"
@@ -30,14 +50,26 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import numpy as np
 import soundfile as sf
-import torch
-from kokoro import KPipeline
 
+from active_tts import (
+    ACTIVE_TTS_LANGUAGE,
+    ACTIVE_TTS_MODEL,
+    ACTIVE_TTS_VOICE,
+    MODEL_SAMPLE_RATE,
+    MODEL_TO_ROUTE,
+    default_language_for,
+    default_voice_for,
+    detect_device,
+    ensure_route_active,
+    inactive_message,
+    pin_language_error,
+    pin_voice_error,
+    release_cuda,
+    write_env_hint,
+)
 from piper_engine import VOICES as PIPER_VOICES
 from piper_engine import PiperEngine
-from speecht5_engine import SPEAKERS, SpeechT5Engine
 from tts_stream import stream_kokoro, stream_piper
-from voice_chat import turn_response
 
 VOICE_CHAT_PAGE = (ROOT / "voice_chat.html").read_text(encoding="utf-8")
 
@@ -142,20 +174,28 @@ VOICE_LANG = {
     voice["id"]: item["code"] for item in CATALOG for voice in item["voices"]
 }
 
-if torch.cuda.is_available():
-    DEVICE = "cuda"
-elif torch.backends.mps.is_available():
-    DEVICE = "mps"
-else:
-    DEVICE = "cpu"
-pipelines: dict[str, KPipeline] = {}
+DEVICE = detect_device() if ACTIVE_TTS_MODEL in ("kokoro", "speecht5") else "cpu"
+pipelines: dict[str, object] = {}
 pipeline_lock = threading.Lock()
-speecht5 = SpeechT5Engine(DEVICE)
+_speecht5 = None
+_piper: PiperEngine | None = None
+magpie_proc: subprocess.Popen | None = None
+magpie_lock = threading.Lock()
+
+# Catalog metadata only (no model weights / no torch import).
+SPEECHT5_SPEAKERS = [
+    ("slt", "SLT (US female)"),
+    ("clb", "CLB (US female)"),
+    ("bdl", "BDL (US male)"),
+    ("rms", "RMS (US male)"),
+    ("ksp", "KSP (Indian English)"),
+    ("awb", "AWB (Scottish)"),
+]
 SPEECHT5_LANG = [
     {
         "code": "en",
         "name": "English",
-        "voices": [{"id": key, "label": label} for key, label in SPEAKERS],
+        "voices": [{"id": key, "label": label} for key, label in SPEECHT5_SPEAKERS],
     }
 ]
 MAGPIE_VOICES = [
@@ -213,15 +253,72 @@ MODELS = [
         "languages": PIPER_LANG,
     },
 ]
-piper = PiperEngine(ROOT / "models" / "piper")
-magpie_proc: subprocess.Popen | None = None
-magpie_lock = threading.Lock()
 
 
-def pipeline_for(lang: str) -> KPipeline:
-    if lang not in pipelines:
-        pipelines[lang] = KPipeline(lang_code=lang, device=DEVICE)
+def get_piper() -> PiperEngine:
+    global _piper
+    if ACTIVE_TTS_MODEL != "piper":
+        raise RuntimeError(inactive_message("piper"))
+    if _piper is None:
+        _piper = PiperEngine(ROOT / "models" / "piper", single_active=True)
+    return _piper
+
+
+def get_speecht5():
+    global _speecht5, DEVICE
+    if ACTIVE_TTS_MODEL != "speecht5":
+        raise RuntimeError(inactive_message("speecht5"))
+    if _speecht5 is None:
+        from speecht5_engine import SpeechT5Engine
+
+        DEVICE = detect_device()
+        _speecht5 = SpeechT5Engine(DEVICE)
+    return _speecht5
+
+
+def pipeline_for(lang: str):
+    """Kokoro: keep a single language pipeline in RAM; files stay on disk."""
+    global DEVICE
+    if ACTIVE_TTS_MODEL != "kokoro":
+        raise RuntimeError(inactive_message("kokoro"))
+    pin_err = pin_language_error(lang)
+    if pin_err:
+        raise RuntimeError(pin_err)
+    if lang in pipelines:
+        return pipelines[lang]
+    from kokoro import KPipeline
+
+    DEVICE = detect_device()
+    # Drop other language pipelines so only one Kokoro stack stays in RAM.
+    for key in list(pipelines.keys()):
+        del pipelines[key]
+    release_cuda()
+    pipelines[lang] = KPipeline(lang_code=lang, device=DEVICE)
     return pipelines[lang]
+
+
+def preload_active_engine() -> None:
+    """Load only ACTIVE_TTS_MODEL into RAM. Other engines stay on disk unused."""
+    voice = default_voice_for(ACTIVE_TTS_MODEL)
+    lang = default_language_for(ACTIVE_TTS_MODEL)
+    print(
+        f"Active TTS: {ACTIVE_TTS_MODEL} (disk cache under {ROOT / 'models'}; "
+        "only this engine loads into RAM)",
+        flush=True,
+    )
+    print(write_env_hint(ROOT), flush=True)
+    if ACTIVE_TTS_MODEL == "kokoro":
+        print(f"Preloading Kokoro lang={lang} voice={voice} on {detect_device()}…", flush=True)
+        pipeline_for(lang)
+    elif ACTIVE_TTS_MODEL == "piper":
+        print(f"Preloading Piper voice={voice}…", flush=True)
+        get_piper().voice(voice)
+    elif ACTIVE_TTS_MODEL == "speecht5":
+        print(f"Preloading SpeechT5 on {detect_device()}…", flush=True)
+        get_speecht5().load()
+    elif ACTIVE_TTS_MODEL == "magpie":
+        print("Starting Magpie subprocess…", flush=True)
+        start_magpie()
 
 
 def _native_binary(path: Path) -> bool:
@@ -657,9 +754,15 @@ PAGE = """<!DOCTYPE html>
 
 
 def render_page(initial: str) -> bytes:
-    if initial not in {item["id"] for item in MODELS}:
-        initial = "kokoro"
-    html = PAGE.replace("__MODELS__", json.dumps(MODELS)).replace("__INITIAL__", json.dumps(initial))
+    # UI only exposes the RAM-active engine; other models stay on disk until restart.
+    active_models = [item for item in MODELS if item["id"] == ACTIVE_TTS_MODEL]
+    if not active_models:
+        active_models = MODELS[:1]
+    if initial != ACTIVE_TTS_MODEL:
+        initial = ACTIVE_TTS_MODEL
+    html = PAGE.replace("__MODELS__", json.dumps(active_models)).replace(
+        "__INITIAL__", json.dumps(initial)
+    )
     return html.encode()
 
 
@@ -702,40 +805,68 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, VOICE_CHAT_PAGE.encode(), "text/html; charset=utf-8")
             return
         if path == "/api/models":
+            catalog_by_id = {
+                "kokoro": {
+                    "id": "kokoro",
+                    "repo": "hexgrad/Kokoro-82M",
+                    "route": "/api/speech",
+                    "sample_rate": 24000,
+                    "streaming": True,
+                    "languages": CATALOG,
+                },
+                "speecht5": {
+                    "id": "speecht5",
+                    "repo": "microsoft/speecht5_tts",
+                    "route": "/api/speecht5",
+                    "sample_rate": 16000,
+                    "languages": SPEECHT5_LANG,
+                },
+                "magpie": {
+                    "id": "magpie",
+                    "repo": "nvidia/magpie_tts_multilingual_357m",
+                    "route": "/api/magpie",
+                    "sample_rate": 22050,
+                    "languages": MAGPIE_LANG,
+                },
+                "piper": {
+                    "id": "piper",
+                    "repo": "rhasspy/piper-voices",
+                    "route": "/api/piper",
+                    "sample_rate": 22050,
+                    "streaming": True,
+                    "languages": PIPER_LANG,
+                },
+            }
+            models = []
+            for mid, item in catalog_by_id.items():
+                entry = dict(item)
+                entry["active"] = mid == ACTIVE_TTS_MODEL
+                entry["loaded_in_ram"] = mid == ACTIVE_TTS_MODEL
+                models.append(entry)
             payload = {
                 "device": DEVICE,
-                "models": [
-                    {
-                        "id": "kokoro",
-                        "repo": "hexgrad/Kokoro-82M",
-                        "route": "/api/speech",
-                        "sample_rate": 24000,
-                        "streaming": True,
-                        "languages": CATALOG,
-                    },
-                    {
-                        "id": "speecht5",
-                        "repo": "microsoft/speecht5_tts",
-                        "route": "/api/speecht5",
-                        "sample_rate": 16000,
-                        "languages": SPEECHT5_LANG,
-                    },
-                    {
-                        "id": "magpie",
-                        "repo": "nvidia/magpie_tts_multilingual_357m",
-                        "route": "/api/magpie",
-                        "sample_rate": 22050,
-                        "languages": MAGPIE_LANG,
-                    },
-                    {
-                        "id": "piper",
-                        "repo": "rhasspy/piper-voices",
-                        "route": "/api/piper",
-                        "sample_rate": 22050,
-                        "streaming": True,
-                        "languages": PIPER_LANG,
-                    },
-                ],
+                "active_model": ACTIVE_TTS_MODEL,
+                "active_voice": ACTIVE_TTS_VOICE or None,
+                "active_language": ACTIVE_TTS_LANGUAGE or None,
+                "active_route": MODEL_TO_ROUTE[ACTIVE_TTS_MODEL],
+                "active_sample_rate": MODEL_SAMPLE_RATE[ACTIVE_TTS_MODEL],
+                "policy": (
+                    "All model files may remain on disk under ./models. "
+                    "Only ACTIVE_TTS_MODEL is loaded into RAM. "
+                    "Change ACTIVE_TTS_* in /data/tts/.env then: pm2 restart tts --update-env"
+                ),
+                "models": models,
+            }
+            self._send(200, json.dumps(payload).encode(), "application/json")
+            return
+        if path == "/api/active":
+            payload = {
+                "active_model": ACTIVE_TTS_MODEL,
+                "active_voice": ACTIVE_TTS_VOICE or default_voice_for(ACTIVE_TTS_MODEL),
+                "active_language": ACTIVE_TTS_LANGUAGE or default_language_for(ACTIVE_TTS_MODEL),
+                "route": MODEL_TO_ROUTE[ACTIVE_TTS_MODEL],
+                "sample_rate": MODEL_SAMPLE_RATE[ACTIVE_TTS_MODEL],
+                "device": DEVICE,
             }
             self._send(200, json.dumps(payload).encode(), "application/json")
             return
@@ -745,13 +876,20 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length", "0"))
         if path == "/api/voice-chat/turn":
+            if ACTIVE_TTS_MODEL != "piper":
+                self._send(503, inactive_message("piper").encode(), "text/plain; charset=utf-8")
+                return
             try:
                 payload = json.loads(self.rfile.read(length).decode())
             except json.JSONDecodeError:
                 self._send(400, b"Invalid JSON", "text/plain; charset=utf-8")
                 return
             user_text = str(payload.get("user_text", "")).strip()
-            voice = str(payload.get("voice") or "en_US-lessac-medium")
+            voice = str(payload.get("voice") or default_voice_for("piper"))
+            pin_err = pin_voice_error(voice)
+            if pin_err:
+                self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                return
             history = payload.get("messages") or []
             if not isinstance(history, list):
                 self._send(400, b"messages must be a list", "text/plain; charset=utf-8")
@@ -760,8 +898,10 @@ class Handler(BaseHTTPRequestHandler):
             if ollama_model is not None:
                 ollama_model = str(ollama_model).strip() or None
             try:
+                from voice_chat import turn_response
+
                 result = turn_response(
-                    history, user_text, voice, piper, ollama_model=ollama_model
+                    history, user_text, voice, get_piper(), ollama_model=ollama_model
                 )
             except Exception as exc:  # noqa: BLE001
                 self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
@@ -770,6 +910,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/speech", "/api/speecht5", "/api/magpie", "/api/piper"):
             self._send(404, b"Not found", "text/plain; charset=utf-8")
+            return
+        inactive = ensure_route_active(path)
+        if inactive:
+            self._send(503, inactive.encode(), "text/plain; charset=utf-8")
             return
         try:
             payload = json.loads(self.rfile.read(length).decode())
@@ -789,15 +933,23 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if want_stream and path == "/api/piper":
-            voice = str(payload.get("voice") or "en_US-lessac-medium")
+            voice = str(payload.get("voice") or default_voice_for("piper"))
+            pin_err = pin_voice_error(voice)
+            if pin_err:
+                self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                return
             try:
-                self._send_sse(stream_piper(text, voice, piper))
+                self._send_sse(stream_piper(text, voice, get_piper()))
             except Exception as exc:  # noqa: BLE001
                 self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
             return
         if want_stream:
-            voice = str(payload.get("voice") or "af_heart")
+            voice = str(payload.get("voice") or default_voice_for("kokoro"))
             lang = str(payload.get("language") or VOICE_LANG.get(voice, "a"))
+            pin_err = pin_voice_error(voice) or pin_language_error(lang)
+            if pin_err:
+                self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                return
             try:
                 self._send_sse(
                     stream_kokoro(
@@ -809,21 +961,37 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if path == "/api/speecht5":
-                voice = str(payload.get("voice") or "slt")
-                audio = speecht5.synthesize(text, voice)
+                voice = str(payload.get("voice") or default_voice_for("speecht5"))
+                pin_err = pin_voice_error(voice)
+                if pin_err:
+                    self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                    return
+                audio = get_speecht5().synthesize(text, voice)
                 filename = "speecht5.wav"
             elif path == "/api/magpie":
-                voice = str(payload.get("voice") or "Sofia")
-                lang = str(payload.get("language") or "en-US")
+                voice = str(payload.get("voice") or default_voice_for("magpie"))
+                lang = str(payload.get("language") or default_language_for("magpie"))
+                pin_err = pin_voice_error(voice) or pin_language_error(lang)
+                if pin_err:
+                    self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                    return
                 audio = synthesize_magpie(text, voice, lang)
                 filename = "magpie.wav"
             elif path == "/api/piper":
-                voice = str(payload.get("voice") or "en_US-lessac-medium")
-                audio = piper.synthesize(text, voice)
+                voice = str(payload.get("voice") or default_voice_for("piper"))
+                pin_err = pin_voice_error(voice)
+                if pin_err:
+                    self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                    return
+                audio = get_piper().synthesize(text, voice)
                 filename = "piper.wav"
             else:
-                voice = str(payload.get("voice") or "af_heart")
+                voice = str(payload.get("voice") or default_voice_for("kokoro"))
                 lang = str(payload.get("language") or VOICE_LANG.get(voice, "a"))
+                pin_err = pin_voice_error(voice) or pin_language_error(lang)
+                if pin_err:
+                    self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                    return
                 if voice not in VOICE_LANG or VOICE_LANG[voice] != lang:
                     self._send(400, b"That voice does not match the selected language.", "text/plain; charset=utf-8")
                     return
@@ -838,15 +1006,19 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    print(f"Loading Kokoro-82M on {DEVICE}…", flush=True)
-    pipeline_for("a")
+    preload_active_engine()
     base = f"http://{UI_HOST}:{UI_PORT}" if UI_HOST not in ("0.0.0.0", "::") else f"http://127.0.0.1:{UI_PORT}"
     print(f"Listening on {UI_HOST}:{UI_PORT}", flush=True)
-    print(f"Kokoro: {base}/", flush=True)
-    print(f"SpeechT5: {base}/speecht5", flush=True)
-    print(f"Magpie: {base}/magpie", flush=True)
-    print(f"Piper: {base}/piper", flush=True)
-    print(f"Voice chat: {base}/voice-chat", flush=True)
+    print(f"Active route: {base}{MODEL_TO_ROUTE[ACTIVE_TTS_MODEL]}", flush=True)
+    print(f"Status: {base}/api/active  |  catalog: {base}/api/models", flush=True)
+    if ACTIVE_TTS_MODEL == "piper":
+        print(f"UI: {base}/piper", flush=True)
+    elif ACTIVE_TTS_MODEL == "kokoro":
+        print(f"UI: {base}/", flush=True)
+    elif ACTIVE_TTS_MODEL == "speecht5":
+        print(f"UI: {base}/speecht5", flush=True)
+    elif ACTIVE_TTS_MODEL == "magpie":
+        print(f"UI: {base}/magpie", flush=True)
     ThreadingHTTPServer((UI_HOST, UI_PORT), Handler).serve_forever()
 
 

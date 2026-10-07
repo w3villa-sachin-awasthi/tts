@@ -1,7 +1,11 @@
-"""Piper medium voices. Each file is the small VITS model, about 15–20 million parameters."""
+"""Piper medium voices. Each file is the small VITS model, about 15–20 million parameters.
+
+By default only one voice stays in RAM; other voice files remain on disk under model_dir.
+"""
 
 from __future__ import annotations
 
+import gc
 import io
 import threading
 
@@ -29,8 +33,9 @@ def voice_repo_path(voice_id: str) -> str:
 
 
 class PiperEngine:
-    def __init__(self, model_dir) -> None:
+    def __init__(self, model_dir, *, single_active: bool = True) -> None:
         self.model_dir = model_dir
+        self.single_active = single_active
         self.lock = threading.Lock()
         self.loaded: dict[str, object] = {}
 
@@ -54,14 +59,24 @@ class PiperEngine:
         )
         return str(folder / f"{relative}.onnx")
 
+    def unload_all(self) -> None:
+        self.loaded.clear()
+        gc.collect()
+
     def voice(self, voice_id: str):
         if voice_id not in {item[2] for item in VOICES}:
             raise ValueError("Unknown Piper voice.")
-        if voice_id not in self.loaded:
-            from piper import PiperVoice
+        if voice_id in self.loaded:
+            return self.loaded[voice_id]
+        from piper import PiperVoice
 
-            self.loaded[voice_id] = PiperVoice.load(self._onnx_path(voice_id))
+        if self.single_active and self.loaded:
+            self.unload_all()
+        self.loaded[voice_id] = PiperVoice.load(self._onnx_path(voice_id))
         return self.loaded[voice_id]
+
+    def active_voice_ids(self) -> list[str]:
+        return list(self.loaded.keys())
 
     def iter_synthesize(self, text: str, voice_id: str):
         with self.lock:
