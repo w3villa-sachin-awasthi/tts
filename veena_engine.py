@@ -77,10 +77,8 @@ class VeenaEngine:
             from snac import SNAC
 
             load_4bit = _env("VEENA_LOAD_IN_4BIT", "0").lower() in ("1", "true", "yes")
-            kwargs: dict = {
-                "trust_remote_code": True,
-                "device_map": "auto" if self.device == "cuda" else None,
-            }
+            # Avoid device_map="auto" (needs accelerate). Jetson: load then .to(cuda).
+            kwargs: dict = {"trust_remote_code": True}
             if load_4bit and self.device == "cuda":
                 from transformers import BitsAndBytesConfig
 
@@ -90,16 +88,16 @@ class VeenaEngine:
                     bnb_4bit_compute_dtype=torch.float16,
                     bnb_4bit_use_double_quant=True,
                 )
+                kwargs["device_map"] = {"": 0}
             else:
-                dtype = torch.float16 if self.device == "cuda" else torch.float32
-                kwargs["torch_dtype"] = dtype
+                kwargs["dtype"] = torch.float16 if self.device == "cuda" else torch.float32
 
             print(f"Loading Veena {self.model_id} on {self.device}…", flush=True)
             self.tokenizer = AutoTokenizer.from_pretrained(
                 self.model_id, trust_remote_code=True
             )
             self.model = AutoModelForCausalLM.from_pretrained(self.model_id, **kwargs)
-            if self.device != "cuda" or kwargs.get("device_map") is None:
+            if "device_map" not in kwargs:
                 self.model.to(self.device)
             self.model.eval()
 
