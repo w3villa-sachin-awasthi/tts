@@ -64,7 +64,6 @@ from active_tts import (
     inactive_message,
     pin_language_error,
     pin_voice_error,
-    release_cuda,
     write_env_hint,
 )
 from piper_engine import VOICES as PIPER_VOICES
@@ -176,7 +175,10 @@ VOICE_LANG = {
 
 DEVICE = detect_device() if ACTIVE_TTS_MODEL in ("kokoro", "speecht5") else "cpu"
 pipelines: dict[str, object] = {}
+_kokoro_model = None
 pipeline_lock = threading.Lock()
+KOKORO_SPEED = float(os.environ.get("KOKORO_SPEED", "1.0"))
+KOKORO_SPLIT = r"[.!?,;:\u0964]\s+"
 _speecht5 = None
 _piper: PiperEngine | None = None
 magpie_proc: subprocess.Popen | None = None
@@ -277,8 +279,8 @@ def get_speecht5():
 
 
 def pipeline_for(lang: str):
-    """Kokoro: keep a single language pipeline in RAM; files stay on disk."""
-    global DEVICE
+    """Kokoro: one model in RAM, shared by every language pipeline (e.g. English + Hindi)."""
+    global DEVICE, _kokoro_model
     if ACTIVE_TTS_MODEL != "kokoro":
         raise RuntimeError(inactive_message("kokoro"))
     pin_err = pin_language_error(lang)
@@ -286,14 +288,12 @@ def pipeline_for(lang: str):
         raise RuntimeError(pin_err)
     if lang in pipelines:
         return pipelines[lang]
-    from kokoro import KPipeline
+    from kokoro import KModel, KPipeline
 
-    DEVICE = detect_device()
-    # Drop other language pipelines so only one Kokoro stack stays in RAM.
-    for key in list(pipelines.keys()):
-        del pipelines[key]
-    release_cuda()
-    pipelines[lang] = KPipeline(lang_code=lang, device=DEVICE)
+    if _kokoro_model is None:
+        DEVICE = detect_device()
+        _kokoro_model = KModel().to(DEVICE).eval()
+    pipelines[lang] = KPipeline(lang_code=lang, model=_kokoro_model, device=DEVICE)
     return pipelines[lang]
 
 
@@ -464,7 +464,9 @@ def synthesize_magpie(text: str, voice: str, lang: str) -> bytes:
 def synthesize(text: str, voice: str, lang: str) -> bytes:
     with pipeline_lock:
         chunks = []
-        for _graphemes, _phonemes, audio in pipeline_for(lang)(text, voice=voice, speed=1):
+        for _graphemes, _phonemes, audio in pipeline_for(lang)(
+            text, voice=voice, speed=KOKORO_SPEED, split_pattern=KOKORO_SPLIT
+        ):
             if audio is not None and len(audio):
                 chunks.append(np.asarray(audio, dtype=np.float32))
     if not chunks:
@@ -953,7 +955,14 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self._send_sse(
                     stream_kokoro(
-                        text, voice, lang, pipeline_for, pipeline_lock, VOICE_LANG
+                        text,
+                        voice,
+                        lang,
+                        pipeline_for,
+                        pipeline_lock,
+                        VOICE_LANG,
+                        KOKORO_SPEED,
+                        KOKORO_SPLIT,
                     )
                 )
             except Exception as exc:  # noqa: BLE001
@@ -992,8 +1001,8 @@ class Handler(BaseHTTPRequestHandler):
                 if pin_err:
                     self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
                     return
-                if voice not in VOICE_LANG or VOICE_LANG[voice] != lang:
-                    self._send(400, b"That voice does not match the selected language.", "text/plain; charset=utf-8")
+                if voice not in VOICE_LANG:
+                    self._send(400, b"Unknown Kokoro voice.", "text/plain; charset=utf-8")
                     return
                 audio = synthesize(text, voice, lang)
                 filename = "kokoro.wav"

@@ -29,14 +29,18 @@ def stream_kokoro(
     pipeline_for,
     pipeline_lock,
     voice_lang: dict,
+    speed: float = 1.0,
+    split_pattern: str = r"\n+",
 ) -> Iterator[bytes]:
-    if voice not in voice_lang or voice_lang[voice] != lang:
-        yield sse_bytes("error", {"message": "That voice does not match the selected language."})
+    if voice not in voice_lang:
+        yield sse_bytes("error", {"message": "Unknown Kokoro voice."})
         return
     yield sse_bytes("meta", {"model": "kokoro", "sample_rate": 24000, "format": "f32le"})
     count = 0
     with pipeline_lock:
-        for _graphemes, _phonemes, audio in pipeline_for(lang)(text, voice=voice, speed=1):
+        for _graphemes, _phonemes, audio in pipeline_for(lang)(
+            text, voice=voice, speed=speed, split_pattern=split_pattern
+        ):
             if audio is None or not len(audio):
                 continue
             chunk = np.asarray(audio, dtype=np.float32)
