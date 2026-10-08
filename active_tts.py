@@ -10,13 +10,14 @@ import gc
 import os
 from pathlib import Path
 
-KNOWN_MODELS = ("kokoro", "piper", "speecht5", "magpie")
+KNOWN_MODELS = ("kokoro", "piper", "speecht5", "magpie", "veena")
 
 ROUTE_TO_MODEL = {
     "/api/speech": "kokoro",
     "/api/piper": "piper",
     "/api/speecht5": "speecht5",
     "/api/magpie": "magpie",
+    "/api/veena": "veena",
 }
 
 MODEL_TO_ROUTE = {model: route for route, model in ROUTE_TO_MODEL.items()}
@@ -26,6 +27,7 @@ MODEL_SAMPLE_RATE = {
     "piper": 22050,
     "speecht5": 16000,
     "magpie": 22050,
+    "veena": 24000,
 }
 
 
@@ -117,6 +119,7 @@ def default_voice_for(model: str) -> str:
         "piper": "en_US-lessac-medium",
         "speecht5": "slt",
         "magpie": "Sofia",
+        "veena": "kavya",
     }[model]
 
 
@@ -128,6 +131,7 @@ def default_language_for(model: str) -> str:
         "piper": "en",
         "speecht5": "en",
         "magpie": "en-US",
+        "veena": "hi-IN",
     }[model]
 
 

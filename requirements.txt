@@ -3,3 +3,6 @@ soundfile
 transformers>=4.46
 sentencepiece
 piper-tts
+snac
+# Optional 4-bit (often broken on Jetson ARM — leave VEENA_LOAD_IN_4BIT=0):
+# bitsandbytes

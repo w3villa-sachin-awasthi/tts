@@ -1,4 +1,4 @@
-"""Server-Sent Events streaming for Kokoro and Piper (float32 PCM chunks)."""
+"""Server-Sent Events streaming for Kokoro, Piper, and Veena (float32 PCM chunks)."""
 
 from __future__ import annotations
 
@@ -67,3 +67,19 @@ def stream_piper(text: str, voice_id: str, piper) -> Iterator[bytes]:
         yield sse_bytes("error", {"message": "Piper returned no audio."})
         return
     yield sse_bytes("end", {"chunks": count, "sample_rate": sample_rate})
+
+
+def stream_veena(text: str, voice: str, veena) -> Iterator[bytes]:
+    yield sse_bytes("meta", {"model": "veena", "sample_rate": 24000, "format": "f32le"})
+    count = 0
+    try:
+        for audio in veena.iter_synthesize(text, voice):
+            count += 1
+            yield sse_bytes("chunk", encode_f32_chunk(audio))
+    except Exception as exc:  # noqa: BLE001
+        yield sse_bytes("error", {"message": str(exc)})
+        return
+    if count == 0:
+        yield sse_bytes("error", {"message": "Veena returned no audio."})
+        return
+    yield sse_bytes("end", {"chunks": count})

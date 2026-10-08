@@ -69,7 +69,8 @@ from active_tts import (
 )
 from piper_engine import VOICES as PIPER_VOICES
 from piper_engine import PiperEngine
-from tts_stream import stream_kokoro, stream_piper
+from tts_stream import stream_kokoro, stream_piper, stream_veena
+from veena_engine import SPEAKERS as VEENA_SPEAKERS
 
 VOICE_CHAT_PAGE = (ROOT / "voice_chat.html").read_text(encoding="utf-8")
 
@@ -174,11 +175,16 @@ VOICE_LANG = {
     voice["id"]: item["code"] for item in CATALOG for voice in item["voices"]
 }
 
-DEVICE = detect_device() if ACTIVE_TTS_MODEL in ("kokoro", "speecht5") else "cpu"
+DEVICE = (
+    detect_device()
+    if ACTIVE_TTS_MODEL in ("kokoro", "speecht5", "veena")
+    else "cpu"
+)
 pipelines: dict[str, object] = {}
 pipeline_lock = threading.Lock()
 _speecht5 = None
 _piper: PiperEngine | None = None
+_veena = None
 magpie_proc: subprocess.Popen | None = None
 magpie_lock = threading.Lock()
 
@@ -221,6 +227,14 @@ for code, name, voice_id, label in PIPER_VOICES:
         PIPER_LANG.append(match)
     match["voices"].append({"id": voice_id, "label": label})
 
+VEENA_LANG = [
+    {
+        "code": "hi-IN",
+        "name": "Hindi / English / code-mix",
+        "voices": [{"id": key, "label": label} for key, label in VEENA_SPEAKERS],
+    }
+]
+
 MODELS = [
     {
         "id": "kokoro",
@@ -252,6 +266,14 @@ MODELS = [
         "streaming": True,
         "languages": PIPER_LANG,
     },
+    {
+        "id": "veena",
+        "name": "Veena ~3B",
+        "route": "/api/veena",
+        "note": "Hindi / English / code-mix. GPU recommended. Custom SNAC streaming.",
+        "streaming": True,
+        "languages": VEENA_LANG,
+    },
 ]
 
 
@@ -274,6 +296,19 @@ def get_speecht5():
         DEVICE = detect_device()
         _speecht5 = SpeechT5Engine(DEVICE)
     return _speecht5
+
+
+def get_veena():
+    global _veena, DEVICE
+    if ACTIVE_TTS_MODEL != "veena":
+        raise RuntimeError(inactive_message("veena"))
+    if _veena is None:
+        from veena_engine import VeenaEngine
+
+        override = os.environ.get("VEENA_DEVICE", "").strip().lower()
+        DEVICE = override if override in ("cuda", "cpu") else detect_device()
+        _veena = VeenaEngine(DEVICE)
+    return _veena
 
 
 def pipeline_for(lang: str):
@@ -319,6 +354,9 @@ def preload_active_engine() -> None:
     elif ACTIVE_TTS_MODEL == "magpie":
         print("Starting Magpie subprocess…", flush=True)
         start_magpie()
+    elif ACTIVE_TTS_MODEL == "veena":
+        print(f"Preloading Veena voice={voice}…", flush=True)
+        get_veena().load()
 
 
 def _native_binary(path: Path) -> bool:
@@ -560,7 +598,7 @@ PAGE = """<!DOCTYPE html>
         </div>
       </div>
       <label style="display:block;margin-top:12px;font-size:0.9rem;">
-        <input type="checkbox" id="stream" /> Stream audio (Kokoro &amp; Piper only)
+        <input type="checkbox" id="stream" /> Stream audio (Kokoro, Piper &amp; Veena)
       </label>
       <button id="speak" type="submit">Speak</button>
       <div id="status" class="status"></div>
@@ -607,8 +645,15 @@ PAGE = """<!DOCTYPE html>
       speecht5: "Hello from SpeechT5 on this Mac.",
       magpie: "Hello from Magpie on this Mac.",
       piper: "Hello from Piper on this Mac.",
+      veena: "आज मैंने एक नई तकनीक के बारे में सीखा।",
     };
-    const paths = { kokoro: "/", speecht5: "/speecht5", magpie: "/magpie", piper: "/piper" };
+    const paths = {
+      kokoro: "/",
+      speecht5: "/speecht5",
+      magpie: "/magpie",
+      piper: "/piper",
+      veena: "/veena",
+    };
 
     function syncStreamToggle() {
       const canStream = !!currentModel().streaming;
@@ -801,6 +846,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/piper":
             self._send(200, render_page("piper"), "text/html; charset=utf-8")
             return
+        if path == "/veena":
+            self._send(200, render_page("veena"), "text/html; charset=utf-8")
+            return
         if path == "/voice-chat":
             self._send(200, VOICE_CHAT_PAGE.encode(), "text/html; charset=utf-8")
             return
@@ -835,6 +883,14 @@ class Handler(BaseHTTPRequestHandler):
                     "sample_rate": 22050,
                     "streaming": True,
                     "languages": PIPER_LANG,
+                },
+                "veena": {
+                    "id": "veena",
+                    "repo": "maya-research/Veena",
+                    "route": "/api/veena",
+                    "sample_rate": 24000,
+                    "streaming": True,
+                    "languages": VEENA_LANG,
                 },
             }
             models = []
@@ -908,7 +964,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(200, json.dumps(result).encode(), "application/json")
             return
-        if path not in ("/api/speech", "/api/speecht5", "/api/magpie", "/api/piper"):
+        if path not in (
+            "/api/speech",
+            "/api/speecht5",
+            "/api/magpie",
+            "/api/piper",
+            "/api/veena",
+        ):
             self._send(404, b"Not found", "text/plain; charset=utf-8")
             return
         inactive = ensure_route_active(path)
@@ -925,10 +987,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, b"Text is required", "text/plain; charset=utf-8")
             return
         want_stream = bool(payload.get("stream"))
-        if want_stream and path not in ("/api/speech", "/api/piper"):
+        if want_stream and path not in ("/api/speech", "/api/piper", "/api/veena"):
             self._send(
                 400,
-                b"Streaming is only supported for Kokoro (/api/speech) and Piper (/api/piper).",
+                b"Streaming is only supported for Kokoro, Piper, and Veena.",
                 "text/plain; charset=utf-8",
             )
             return
@@ -940,6 +1002,17 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 self._send_sse(stream_piper(text, voice, get_piper()))
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+            return
+        if want_stream and path == "/api/veena":
+            voice = str(payload.get("voice") or default_voice_for("veena"))
+            pin_err = pin_voice_error(voice)
+            if pin_err:
+                self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                return
+            try:
+                self._send_sse(stream_veena(text, voice, get_veena()))
             except Exception as exc:  # noqa: BLE001
                 self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
             return
@@ -985,6 +1058,14 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 audio = get_piper().synthesize(text, voice)
                 filename = "piper.wav"
+            elif path == "/api/veena":
+                voice = str(payload.get("voice") or default_voice_for("veena"))
+                pin_err = pin_voice_error(voice)
+                if pin_err:
+                    self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                    return
+                audio = get_veena().synthesize(text, voice)
+                filename = "veena.wav"
             else:
                 voice = str(payload.get("voice") or default_voice_for("kokoro"))
                 lang = str(payload.get("language") or VOICE_LANG.get(voice, "a"))
@@ -1019,6 +1100,8 @@ def main() -> None:
         print(f"UI: {base}/speecht5", flush=True)
     elif ACTIVE_TTS_MODEL == "magpie":
         print(f"UI: {base}/magpie", flush=True)
+    elif ACTIVE_TTS_MODEL == "veena":
+        print(f"UI: {base}/veena", flush=True)
     ThreadingHTTPServer((UI_HOST, UI_PORT), Handler).serve_forever()
 
 

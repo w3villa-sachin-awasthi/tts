@@ -28,6 +28,10 @@ module.exports = {
         // After: bash scripts/jetson-install-nemo-speech.sh
         NEMO_SPEECH_BIN: "/data/tts/nemo-speech/bin/nemo-speech",
         MAGPIE_DEVICE: "cuda",
+        // Veena (maya-research/Veena) — set ACTIVE_TTS_MODEL=veena in .env to use
+        VEENA_DEVICE: "cuda",
+        VEENA_MODEL_ID: "maya-research/Veena",
+        VEENA_LOAD_IN_4BIT: "0",
       },
       max_restarts: 10,
       restart_delay: 5000,
