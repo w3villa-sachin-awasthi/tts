@@ -11,7 +11,8 @@ from queue import Empty, Queue
 import numpy as np
 import soundfile as sf
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, BaseStreamer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.generation.streamers import BaseStreamer
 
 SPEAKERS = [
     ("kavya", "Kavya (female)"),
