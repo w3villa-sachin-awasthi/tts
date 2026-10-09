@@ -1,4 +1,4 @@
-"""Server-Sent Events streaming for Kokoro and Piper (float32 PCM chunks)."""
+"""Server-Sent Events streaming for Kokoro, Piper, and Parler (float32 PCM chunks)."""
 
 from __future__ import annotations
 
@@ -71,3 +71,22 @@ def stream_piper(text: str, voice_id: str, piper) -> Iterator[bytes]:
         yield sse_bytes("error", {"message": "Piper returned no audio."})
         return
     yield sse_bytes("end", {"chunks": count, "sample_rate": sample_rate})
+
+
+def stream_parler(text: str, voice: str, parler) -> Iterator[bytes]:
+    try:
+        audio, rate = parler.synthesize_array(text, voice)
+    except Exception as exc:  # noqa: BLE001
+        yield sse_bytes("error", {"message": str(exc)})
+        return
+    yield sse_bytes("meta", {"model": "parler", "sample_rate": rate, "format": "f32le"})
+    # Parler returns full utterance; slice into ~100 ms SSE chunks for LiveKit.
+    step = max(1, int(rate // 10))
+    count = 0
+    for start in range(0, audio.size, step):
+        count += 1
+        yield sse_bytes("chunk", encode_f32_chunk(audio[start : start + step]))
+    if count == 0:
+        yield sse_bytes("error", {"message": "Parler returned no audio."})
+        return
+    yield sse_bytes("end", {"chunks": count, "sample_rate": rate})

@@ -3,3 +3,4 @@ soundfile
 transformers>=4.46
 sentencepiece
 piper-tts
+# Parler (Jetson): pip install git+https://github.com/huggingface/parler-tts.git
