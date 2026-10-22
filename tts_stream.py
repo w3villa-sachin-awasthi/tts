@@ -1,4 +1,4 @@
-"""Server-Sent Events streaming for Kokoro, Piper, and Parler (float32 PCM chunks)."""
+"""Server-Sent Events streaming for Kokoro, Piper, Parler, and Dia (float32 PCM chunks)."""
 
 from __future__ import annotations
 
@@ -88,5 +88,41 @@ def stream_parler(text: str, voice: str, parler) -> Iterator[bytes]:
         yield sse_bytes("chunk", encode_f32_chunk(audio[start : start + step]))
     if count == 0:
         yield sse_bytes("error", {"message": "Parler returned no audio."})
+        return
+    yield sse_bytes("end", {"chunks": count, "sample_rate": rate})
+
+
+def stream_dia(text: str, voice: str, dia) -> Iterator[bytes]:
+    try:
+        audio, rate = dia.synthesize_array(text, voice)
+    except Exception as exc:  # noqa: BLE001
+        yield sse_bytes("error", {"message": str(exc)})
+        return
+    yield sse_bytes("meta", {"model": "dia", "sample_rate": rate, "format": "f32le"})
+    step = max(1, int(rate // 10))
+    count = 0
+    for start in range(0, audio.size, step):
+        count += 1
+        yield sse_bytes("chunk", encode_f32_chunk(audio[start : start + step]))
+    if count == 0:
+        yield sse_bytes("error", {"message": "Dia returned no audio."})
+        return
+    yield sse_bytes("end", {"chunks": count, "sample_rate": rate})
+
+
+def stream_dia(text: str, voice: str, dia) -> Iterator[bytes]:
+    try:
+        audio, rate = dia.synthesize_array(text, voice)
+    except Exception as exc:  # noqa: BLE001
+        yield sse_bytes("error", {"message": str(exc)})
+        return
+    yield sse_bytes("meta", {"model": "dia", "sample_rate": rate, "format": "f32le"})
+    step = max(1, int(rate // 10))
+    count = 0
+    for start in range(0, audio.size, step):
+        count += 1
+        yield sse_bytes("chunk", encode_f32_chunk(audio[start : start + step]))
+    if count == 0:
+        yield sse_bytes("error", {"message": "Dia returned no audio."})
         return
     yield sse_bytes("end", {"chunks": count, "sample_rate": rate})

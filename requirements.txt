@@ -4,3 +4,5 @@ transformers>=4.46
 sentencepiece
 piper-tts
 # Parler (Jetson): pip install git+https://github.com/huggingface/parler-tts.git
+# Dia: git clone https://github.com/nari-labs/dia.git vendor/dia && pip install -e vendor/dia --no-deps
+descript-audio-codec

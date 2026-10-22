@@ -69,7 +69,7 @@ from active_tts import (
 from piper_engine import VOICES as PIPER_VOICES
 from piper_engine import PiperEngine
 from parler_engine import VOICES as PARLER_VOICES
-from tts_stream import stream_kokoro, stream_parler, stream_piper
+from tts_stream import stream_dia, stream_kokoro, stream_parler, stream_piper
 
 VOICE_CHAT_PAGE = (ROOT / "voice_chat.html").read_text(encoding="utf-8")
 
@@ -174,7 +174,7 @@ VOICE_LANG = {
     voice["id"]: item["code"] for item in CATALOG for voice in item["voices"]
 }
 
-DEVICE = detect_device() if ACTIVE_TTS_MODEL in ("kokoro", "speecht5", "parler") else "cpu"
+DEVICE = detect_device() if ACTIVE_TTS_MODEL in ("kokoro", "speecht5", "parler", "dia") else "cpu"
 pipelines: dict[str, object] = {}
 _kokoro_model = None
 pipeline_lock = threading.Lock()
@@ -182,6 +182,7 @@ KOKORO_SPEED = float(os.environ.get("KOKORO_SPEED", "1.0"))
 KOKORO_SPLIT = r"[.!?\u0964]\s+"
 _speecht5 = None
 _parler = None
+_dia = None
 _piper: PiperEngine | None = None
 magpie_proc: subprocess.Popen | None = None
 magpie_lock = threading.Lock()
@@ -233,6 +234,16 @@ PARLER_LANG = [
     }
 ]
 
+DIA_LANG = [
+    {
+        "code": "en",
+        "name": "English",
+        "voices": [
+            {"id": "default", "label": "Default (random voice)"},
+        ],
+    }
+]
+
 MODELS = [
     {
         "id": "kokoro",
@@ -272,6 +283,14 @@ MODELS = [
         "streaming": True,
         "languages": PARLER_LANG,
     },
+    {
+        "id": "dia",
+        "name": "Nari Dia 1.6B",
+        "route": "/api/dia",
+        "note": "English dialogue. voice=default or path to reference .wav for cloning.",
+        "streaming": True,
+        "languages": DIA_LANG,
+    },
 ]
 
 
@@ -306,6 +325,18 @@ def get_parler():
         DEVICE = detect_device()
         _parler = ParlerEngine(DEVICE)
     return _parler
+
+
+def get_dia():
+    global _dia, DEVICE
+    if ACTIVE_TTS_MODEL != "dia":
+        raise RuntimeError(inactive_message("dia"))
+    if _dia is None:
+        from dia_engine import DiaEngine
+
+        DEVICE = detect_device()
+        _dia = DiaEngine(DEVICE)
+    return _dia
 
 
 def pipeline_for(lang: str):
@@ -352,6 +383,9 @@ def preload_active_engine() -> None:
     elif ACTIVE_TTS_MODEL == "parler":
         print(f"Preloading Parler voice={voice} on {detect_device()}…", flush=True)
         get_parler().load()
+    elif ACTIVE_TTS_MODEL == "dia":
+        print(f"Preloading Dia on {detect_device()}…", flush=True)
+        get_dia().load()
 
 
 def _native_binary(path: Path) -> bool:
@@ -883,6 +917,14 @@ class Handler(BaseHTTPRequestHandler):
                     "streaming": True,
                     "languages": PARLER_LANG,
                 },
+                "dia": {
+                    "id": "dia",
+                    "repo": "nari-labs/Dia-1.6B",
+                    "route": "/api/dia",
+                    "sample_rate": MODEL_SAMPLE_RATE["dia"],
+                    "streaming": True,
+                    "languages": DIA_LANG,
+                },
             }
             models = []
             for mid, item in catalog_by_id.items():
@@ -955,7 +997,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(200, json.dumps(result).encode(), "application/json")
             return
-        if path not in ("/api/speech", "/api/speecht5", "/api/magpie", "/api/piper", "/api/parler"):
+        if path not in (
+            "/api/speech",
+            "/api/speecht5",
+            "/api/magpie",
+            "/api/piper",
+            "/api/parler",
+            "/api/dia",
+        ):
             self._send(404, b"Not found", "text/plain; charset=utf-8")
             return
         inactive = ensure_route_active(path)
@@ -972,10 +1021,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, b"Text is required", "text/plain; charset=utf-8")
             return
         want_stream = bool(payload.get("stream"))
-        if want_stream and path not in ("/api/speech", "/api/piper", "/api/parler"):
+        if want_stream and path not in ("/api/speech", "/api/piper", "/api/parler", "/api/dia"):
             self._send(
                 400,
-                b"Streaming is only supported for Kokoro, Piper, and Parler.",
+                b"Streaming is only supported for Kokoro, Piper, Parler, and Dia.",
                 "text/plain; charset=utf-8",
             )
             return
@@ -999,6 +1048,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 self._send_sse(stream_parler(text, voice, get_parler()))
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+            return
+        if want_stream and path == "/api/dia":
+            voice = str(payload.get("voice") or default_voice_for("dia"))
+            lang = str(payload.get("language") or default_language_for("dia"))
+            pin_err = pin_voice_error(voice) or pin_language_error(lang)
+            if pin_err:
+                self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                return
+            try:
+                self._send_sse(stream_dia(text, voice, get_dia()))
             except Exception as exc:  # noqa: BLE001
                 self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
             return
@@ -1060,6 +1121,15 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 audio = get_parler().synthesize(text, voice)
                 filename = "parler.wav"
+            elif path == "/api/dia":
+                voice = str(payload.get("voice") or default_voice_for("dia"))
+                lang = str(payload.get("language") or default_language_for("dia"))
+                pin_err = pin_voice_error(voice) or pin_language_error(lang)
+                if pin_err:
+                    self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                    return
+                audio = get_dia().synthesize(text, voice)
+                filename = "dia.wav"
             else:
                 voice = str(payload.get("voice") or default_voice_for("kokoro"))
                 lang = str(payload.get("language") or VOICE_LANG.get(voice, "a"))
