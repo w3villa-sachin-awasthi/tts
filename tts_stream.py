@@ -8,6 +8,10 @@ from collections.abc import Iterator
 
 import numpy as np
 
+from log_config import setup_logger
+
+logger = setup_logger(__name__)
+
 
 def sse_bytes(event: str, data: dict) -> bytes:
     payload = json.dumps(data, separators=(",", ":"), ensure_ascii=False)

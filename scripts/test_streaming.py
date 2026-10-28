@@ -6,6 +6,13 @@ from __future__ import annotations
 import json
 import sys
 import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from log_config import setup_logger
+
+logger = setup_logger(__name__)
 
 
 def read_sse_events(url: str, payload: dict) -> list[tuple[str, dict]]:
@@ -50,7 +57,7 @@ def check_model(base: str, route: str, payload: dict, name: str) -> None:
     chunks = sum(1 for k, _ in events if k == "chunk")
     if chunks < 1:
         raise RuntimeError(f"{name} produced no audio chunks")
-    print(f"OK {name}: {chunks} chunk(s), events={kinds}")
+    logger.info("OK %s: %s chunk(s), events=%s", name, chunks, kinds)
 
 
 def main() -> None:
@@ -80,7 +87,7 @@ def main() -> None:
     except urllib.error.HTTPError as exc:
         if exc.code != 400:
             raise
-    print("OK SpeechT5 correctly rejects stream=true")
+    logger.info("OK SpeechT5 correctly rejects stream=true")
 
 
 if __name__ == "__main__":

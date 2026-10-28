@@ -8,6 +8,10 @@ import os
 import urllib.error
 import urllib.request
 
+from log_config import setup_logger
+
+logger = setup_logger(__name__)
+
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma3:270m")
 

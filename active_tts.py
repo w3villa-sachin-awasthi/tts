@@ -10,6 +10,10 @@ import gc
 import os
 from pathlib import Path
 
+from log_config import setup_logger
+
+logger = setup_logger(__name__)
+
 KNOWN_MODELS = ("kokoro", "piper", "speecht5", "magpie", "parler")
 
 ROUTE_TO_MODEL = {

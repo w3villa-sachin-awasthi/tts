@@ -16,6 +16,10 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from log_config import setup_logger
+
+logger = setup_logger(__name__)
+
 ROOT = Path(__file__).resolve().parent
 
 
@@ -331,26 +335,25 @@ def preload_active_engine() -> None:
     """Load only ACTIVE_TTS_MODEL into RAM. Other engines stay on disk unused."""
     voice = default_voice_for(ACTIVE_TTS_MODEL)
     lang = default_language_for(ACTIVE_TTS_MODEL)
-    print(
+    logger.info(
         f"Active TTS: {ACTIVE_TTS_MODEL} (disk cache under {ROOT / 'models'}; "
         "only this engine loads into RAM)",
-        flush=True,
     )
-    print(write_env_hint(ROOT), flush=True)
+    logger.info(write_env_hint(ROOT))
     if ACTIVE_TTS_MODEL == "kokoro":
-        print(f"Preloading Kokoro lang={lang} voice={voice} on {detect_device()}…", flush=True)
+        logger.info(f"Preloading Kokoro lang={lang} voice={voice} on {detect_device()}…")
         pipeline_for(lang)
     elif ACTIVE_TTS_MODEL == "piper":
-        print(f"Preloading Piper voice={voice}…", flush=True)
+        logger.info(f"Preloading Piper voice={voice}…")
         get_piper().voice(voice)
     elif ACTIVE_TTS_MODEL == "speecht5":
-        print(f"Preloading SpeechT5 on {detect_device()}…", flush=True)
+        logger.info(f"Preloading SpeechT5 on {detect_device()}…")
         get_speecht5().load()
     elif ACTIVE_TTS_MODEL == "magpie":
-        print("Starting Magpie subprocess…", flush=True)
+        logger.info("Starting Magpie subprocess…")
         start_magpie()
     elif ACTIVE_TTS_MODEL == "parler":
-        print(f"Preloading Parler voice={voice} on {detect_device()}…", flush=True)
+        logger.info(f"Preloading Parler voice={voice} on {detect_device()}…")
         get_parler().load()
 
 
@@ -1083,19 +1086,19 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     preload_active_engine()
     base = f"http://{UI_HOST}:{UI_PORT}" if UI_HOST not in ("0.0.0.0", "::") else f"http://127.0.0.1:{UI_PORT}"
-    print(f"Listening on {UI_HOST}:{UI_PORT}", flush=True)
-    print(f"Active route: {base}{MODEL_TO_ROUTE[ACTIVE_TTS_MODEL]}", flush=True)
-    print(f"Status: {base}/api/active  |  catalog: {base}/api/models", flush=True)
+    logger.info(f"Listening on {UI_HOST}:{UI_PORT}")
+    logger.info(f"Active route: {base}{MODEL_TO_ROUTE[ACTIVE_TTS_MODEL]}")
+    logger.info(f"Status: {base}/api/active  |  catalog: {base}/api/models")
     if ACTIVE_TTS_MODEL == "piper":
-        print(f"UI: {base}/piper", flush=True)
+        logger.info(f"UI: {base}/piper")
     elif ACTIVE_TTS_MODEL == "kokoro":
-        print(f"UI: {base}/", flush=True)
+        logger.info(f"UI: {base}/")
     elif ACTIVE_TTS_MODEL == "speecht5":
-        print(f"UI: {base}/speecht5", flush=True)
+        logger.info(f"UI: {base}/speecht5")
     elif ACTIVE_TTS_MODEL == "magpie":
-        print(f"UI: {base}/magpie", flush=True)
+        logger.info(f"UI: {base}/magpie")
     elif ACTIVE_TTS_MODEL == "parler":
-        print(f"UI: {base}/parler", flush=True)
+        logger.info(f"UI: {base}/parler")
     ThreadingHTTPServer((UI_HOST, UI_PORT), Handler).serve_forever()
 
 

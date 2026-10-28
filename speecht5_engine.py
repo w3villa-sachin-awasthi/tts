@@ -10,6 +10,10 @@ import numpy as np
 import soundfile as sf
 import torch
 
+from log_config import setup_logger
+
+logger = setup_logger(__name__)
+
 SPEAKERS = [
     ("slt", "SLT (US female)"),
     ("clb", "CLB (US female)"),

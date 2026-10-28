@@ -9,6 +9,10 @@ import numpy as np
 import soundfile as sf
 import torch
 
+from log_config import setup_logger
+
+logger = setup_logger(__name__)
+
 MODEL_ID = "ai4bharat/indic-parler-tts"
 
 # English female speakers from Indic Parler-TTS (Indian English).

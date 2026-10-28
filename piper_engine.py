@@ -12,6 +12,10 @@ import threading
 import numpy as np
 import soundfile as sf
 
+from log_config import setup_logger
+
+logger = setup_logger(__name__)
+
 VOICES = [
     ("en-US", "English (US)", "en_US-lessac-medium", "Lessac (female)"),
     ("en-US", "English (US)", "en_US-amy-medium", "Amy (female)"),
