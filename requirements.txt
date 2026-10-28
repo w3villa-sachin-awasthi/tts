@@ -5,3 +5,4 @@ sentencepiece
 piper-tts
 colorlog>=6.8.0
 # Parler (Jetson): pip install git+https://github.com/huggingface/parler-tts.git
+# Pocket (Jetson): keep CUDA torch — pip install pocket-tts --no-deps && pip install missing deps except torch

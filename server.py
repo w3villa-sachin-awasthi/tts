@@ -73,7 +73,7 @@ from active_tts import (
 from piper_engine import VOICES as PIPER_VOICES
 from piper_engine import PiperEngine
 from parler_engine import VOICES as PARLER_VOICES
-from tts_stream import stream_kokoro, stream_parler, stream_piper
+from tts_stream import stream_kokoro, stream_parler, stream_piper, stream_pocket
 
 VOICE_CHAT_PAGE = (ROOT / "voice_chat.html").read_text(encoding="utf-8")
 
@@ -187,8 +187,17 @@ KOKORO_SPLIT = r"[.!?\u0964]\s+"
 _speecht5 = None
 _parler = None
 _piper: PiperEngine | None = None
+_pocket = None
 magpie_proc: subprocess.Popen | None = None
 magpie_lock = threading.Lock()
+
+POCKET_LANG = [
+    {
+        "code": "en",
+        "name": "English",
+        "voices": [{"id": "alba", "label": "Alba (default)"}],
+    }
+]
 
 # Catalog metadata only (no model weights / no torch import).
 SPEECHT5_SPEAKERS = [
@@ -276,6 +285,14 @@ MODELS = [
         "streaming": True,
         "languages": PARLER_LANG,
     },
+    {
+        "id": "pocket",
+        "name": "Pocket TTS",
+        "route": "/api/pocket",
+        "note": "True streaming. Voice=alba or path to WAV. Hindi: POCKET_CONFIG=hf://saryps-labs/pocket-tts-hindi/config.yaml",
+        "streaming": True,
+        "languages": POCKET_LANG,
+    },
 ]
 
 
@@ -310,6 +327,17 @@ def get_parler():
         DEVICE = detect_device()
         _parler = ParlerEngine(DEVICE)
     return _parler
+
+
+def get_pocket():
+    global _pocket
+    if ACTIVE_TTS_MODEL != "pocket":
+        raise RuntimeError(inactive_message("pocket"))
+    if _pocket is None:
+        from pocket_engine import PocketEngine
+
+        _pocket = PocketEngine()
+    return _pocket
 
 
 def pipeline_for(lang: str):
@@ -355,6 +383,9 @@ def preload_active_engine() -> None:
     elif ACTIVE_TTS_MODEL == "parler":
         logger.info(f"Preloading Parler voice={voice} on {detect_device()}…")
         get_parler().load()
+    elif ACTIVE_TTS_MODEL == "pocket":
+        logger.info(f"Preloading Pocket TTS voice={voice}…")
+        get_pocket().warm(voice)
 
 
 def _native_binary(path: Path) -> bool:
@@ -886,6 +917,14 @@ class Handler(BaseHTTPRequestHandler):
                     "streaming": True,
                     "languages": PARLER_LANG,
                 },
+                "pocket": {
+                    "id": "pocket",
+                    "repo": "kyutai-labs/pocket-tts",
+                    "route": "/api/pocket",
+                    "sample_rate": 24000,
+                    "streaming": True,
+                    "languages": POCKET_LANG,
+                },
             }
             models = []
             for mid, item in catalog_by_id.items():
@@ -958,7 +997,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(200, json.dumps(result).encode(), "application/json")
             return
-        if path not in ("/api/speech", "/api/speecht5", "/api/magpie", "/api/piper", "/api/parler"):
+        if path not in (
+            "/api/speech",
+            "/api/speecht5",
+            "/api/magpie",
+            "/api/piper",
+            "/api/parler",
+            "/api/pocket",
+        ):
             self._send(404, b"Not found", "text/plain; charset=utf-8")
             return
         inactive = ensure_route_active(path)
@@ -975,10 +1021,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, b"Text is required", "text/plain; charset=utf-8")
             return
         want_stream = bool(payload.get("stream"))
-        if want_stream and path not in ("/api/speech", "/api/piper", "/api/parler"):
+        if want_stream and path not in ("/api/speech", "/api/piper", "/api/parler", "/api/pocket"):
             self._send(
                 400,
-                b"Streaming is only supported for Kokoro, Piper, and Parler.",
+                b"Streaming is only supported for Kokoro, Piper, Parler, and Pocket.",
                 "text/plain; charset=utf-8",
             )
             return
@@ -1002,6 +1048,17 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 self._send_sse(stream_parler(text, voice, get_parler()))
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+            return
+        if want_stream and path == "/api/pocket":
+            voice = str(payload.get("voice") or default_voice_for("pocket"))
+            pin_err = pin_voice_error(voice)
+            if pin_err:
+                self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                return
+            try:
+                self._send_sse(stream_pocket(text, voice, get_pocket()))
             except Exception as exc:  # noqa: BLE001
                 self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
             return
@@ -1063,6 +1120,14 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 audio = get_parler().synthesize(text, voice)
                 filename = "parler.wav"
+            elif path == "/api/pocket":
+                voice = str(payload.get("voice") or default_voice_for("pocket"))
+                pin_err = pin_voice_error(voice)
+                if pin_err:
+                    self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                    return
+                audio = get_pocket().synthesize(text, voice)
+                filename = "pocket.wav"
             else:
                 voice = str(payload.get("voice") or default_voice_for("kokoro"))
                 lang = str(payload.get("language") or VOICE_LANG.get(voice, "a"))
@@ -1099,6 +1164,8 @@ def main() -> None:
         logger.info(f"UI: {base}/magpie")
     elif ACTIVE_TTS_MODEL == "parler":
         logger.info(f"UI: {base}/parler")
+    elif ACTIVE_TTS_MODEL == "pocket":
+        logger.info(f"API: {base}/api/pocket")
     ThreadingHTTPServer((UI_HOST, UI_PORT), Handler).serve_forever()
 
 

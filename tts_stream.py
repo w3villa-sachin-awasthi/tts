@@ -1,4 +1,4 @@
-"""Server-Sent Events streaming for Kokoro, Piper, and Parler (float32 PCM chunks)."""
+"""Server-Sent Events streaming for Kokoro, Piper, Parler, and Pocket (float32 PCM chunks)."""
 
 from __future__ import annotations
 
@@ -92,5 +92,22 @@ def stream_parler(text: str, voice: str, parler) -> Iterator[bytes]:
         yield sse_bytes("chunk", encode_f32_chunk(audio[start : start + step]))
     if count == 0:
         yield sse_bytes("error", {"message": "Parler returned no audio."})
+        return
+    yield sse_bytes("end", {"chunks": count, "sample_rate": rate})
+
+
+def stream_pocket(text: str, voice: str, pocket) -> Iterator[bytes]:
+    rate = int(getattr(pocket, "sample_rate", 24000) or 24000)
+    yield sse_bytes("meta", {"model": "pocket", "sample_rate": rate, "format": "f32le"})
+    count = 0
+    try:
+        for audio in pocket.iter_audio(text, voice):
+            count += 1
+            yield sse_bytes("chunk", encode_f32_chunk(audio))
+    except Exception as exc:  # noqa: BLE001
+        yield sse_bytes("error", {"message": str(exc)})
+        return
+    if count == 0:
+        yield sse_bytes("error", {"message": "Pocket returned no audio."})
         return
     yield sse_bytes("end", {"chunks": count, "sample_rate": rate})
