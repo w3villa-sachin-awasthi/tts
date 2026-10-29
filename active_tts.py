@@ -14,7 +14,7 @@ from log_config import setup_logger
 
 logger = setup_logger(__name__)
 
-KNOWN_MODELS = ("kokoro", "piper", "speecht5", "magpie", "parler", "pocket")
+KNOWN_MODELS = ("kokoro", "piper", "speecht5", "magpie", "parler", "pocket", "goonj")
 
 ROUTE_TO_MODEL = {
     "/api/speech": "kokoro",
@@ -23,6 +23,7 @@ ROUTE_TO_MODEL = {
     "/api/magpie": "magpie",
     "/api/parler": "parler",
     "/api/pocket": "pocket",
+    "/api/goonj": "goonj",
 }
 
 MODEL_TO_ROUTE = {model: route for route, model in ROUTE_TO_MODEL.items()}
@@ -34,6 +35,7 @@ MODEL_SAMPLE_RATE = {
     "magpie": 22050,
     "parler": 44100,
     "pocket": 24000,
+    "goonj": 24000,
 }
 
 
@@ -127,6 +129,7 @@ def default_voice_for(model: str) -> str:
         "magpie": "Sofia",
         "parler": "Mary",
         "pocket": "alba",
+        "goonj": "en_priya",
     }[model]
 
 
@@ -140,6 +143,7 @@ def default_language_for(model: str) -> str:
         "magpie": "en-US",
         "parler": "en",
         "pocket": "en",
+        "goonj": "a",
     }[model]
 
 

@@ -1,4 +1,4 @@
-"""Server-Sent Events streaming for Kokoro, Piper, Parler, and Pocket (float32 PCM chunks)."""
+"""Server-Sent Events streaming for Kokoro, Piper, Parler, Pocket, and Goonj (float32 PCM chunks)."""
 
 from __future__ import annotations
 
@@ -109,5 +109,23 @@ def stream_pocket(text: str, voice: str, pocket) -> Iterator[bytes]:
         return
     if count == 0:
         yield sse_bytes("error", {"message": "Pocket returned no audio."})
+        return
+    yield sse_bytes("end", {"chunks": count, "sample_rate": rate})
+
+
+def stream_goonj(text: str, voice: str, goonj, speed: float = 1.0) -> Iterator[bytes]:
+    """True streaming: KPipeline yields audio chunks as they are generated."""
+    rate = int(getattr(goonj, "sample_rate", 24000) or 24000)
+    yield sse_bytes("meta", {"model": "goonj", "sample_rate": rate, "format": "f32le"})
+    count = 0
+    try:
+        for audio in goonj.iter_audio(text, voice, speed=speed):
+            count += 1
+            yield sse_bytes("chunk", encode_f32_chunk(audio))
+    except Exception as exc:  # noqa: BLE001
+        yield sse_bytes("error", {"message": str(exc)})
+        return
+    if count == 0:
+        yield sse_bytes("error", {"message": "Goonj returned no audio."})
         return
     yield sse_bytes("end", {"chunks": count, "sample_rate": rate})

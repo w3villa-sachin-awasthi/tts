@@ -73,7 +73,7 @@ from active_tts import (
 from piper_engine import VOICES as PIPER_VOICES
 from piper_engine import PiperEngine
 from parler_engine import VOICES as PARLER_VOICES
-from tts_stream import stream_kokoro, stream_parler, stream_piper, stream_pocket
+from tts_stream import stream_goonj, stream_kokoro, stream_parler, stream_piper, stream_pocket
 
 VOICE_CHAT_PAGE = (ROOT / "voice_chat.html").read_text(encoding="utf-8")
 
@@ -178,16 +178,22 @@ VOICE_LANG = {
     voice["id"]: item["code"] for item in CATALOG for voice in item["voices"]
 }
 
-DEVICE = detect_device() if ACTIVE_TTS_MODEL in ("kokoro", "speecht5", "parler") else "cpu"
+DEVICE = (
+    detect_device()
+    if ACTIVE_TTS_MODEL in ("kokoro", "speecht5", "parler", "goonj")
+    else "cpu"
+)
 pipelines: dict[str, object] = {}
 _kokoro_model = None
 pipeline_lock = threading.Lock()
 KOKORO_SPEED = float(os.environ.get("KOKORO_SPEED", "1.0"))
 KOKORO_SPLIT = r"[.!?\u0964]\s+"
+GOONJ_SPEED = float(os.environ.get("GOONJ_SPEED", os.environ.get("KOKORO_SPEED", "1.0")))
 _speecht5 = None
 _parler = None
 _piper: PiperEngine | None = None
 _pocket = None
+_goonj = None
 magpie_proc: subprocess.Popen | None = None
 magpie_lock = threading.Lock()
 
@@ -197,6 +203,29 @@ POCKET_LANG = [
         "name": "English",
         "voices": [{"id": "alba", "label": "Alba (default)"}],
     }
+]
+
+from goonj_engine import GOONJ_VOICES, VOICE_LANG as GOONJ_VOICE_LANG
+
+GOONJ_LANG = [
+    {
+        "code": "a",
+        "name": "Indian English",
+        "voices": [
+            {"id": v, "label": v.replace("_", " ").title()}
+            for v in GOONJ_VOICES
+            if v.startswith("en_")
+        ],
+    },
+    {
+        "code": "h",
+        "name": "Hindi",
+        "voices": [
+            {"id": v, "label": v.replace("_", " ").title()}
+            for v in GOONJ_VOICES
+            if v.startswith("hi_") or v == "bed_hindi"
+        ],
+    },
 ]
 
 # Catalog metadata only (no model weights / no torch import).
@@ -293,6 +322,14 @@ MODELS = [
         "streaming": True,
         "languages": POCKET_LANG,
     },
+    {
+        "id": "goonj",
+        "name": "Goonj-1-82M",
+        "route": "/api/goonj",
+        "note": "Kokoro Indian EN/HI fine-tune. True streaming. Voices en_priya, en_ananya, hi_meera, … Set GOONJ_MODEL_DIR.",
+        "streaming": True,
+        "languages": GOONJ_LANG,
+    },
 ]
 
 
@@ -338,6 +375,18 @@ def get_pocket():
 
         _pocket = PocketEngine()
     return _pocket
+
+
+def get_goonj():
+    global _goonj, DEVICE
+    if ACTIVE_TTS_MODEL != "goonj":
+        raise RuntimeError(inactive_message("goonj"))
+    if _goonj is None:
+        from goonj_engine import GoonjEngine
+
+        DEVICE = detect_device()
+        _goonj = GoonjEngine(DEVICE)
+    return _goonj
 
 
 def pipeline_for(lang: str):
@@ -386,6 +435,9 @@ def preload_active_engine() -> None:
     elif ACTIVE_TTS_MODEL == "pocket":
         logger.info(f"Preloading Pocket TTS voice={voice}…")
         get_pocket().warm(voice)
+    elif ACTIVE_TTS_MODEL == "goonj":
+        logger.info(f"Preloading Goonj voice={voice} on {detect_device()}…")
+        get_goonj().warm(voice)
 
 
 def _native_binary(path: Path) -> bool:
@@ -925,6 +977,14 @@ class Handler(BaseHTTPRequestHandler):
                     "streaming": True,
                     "languages": POCKET_LANG,
                 },
+                "goonj": {
+                    "id": "goonj",
+                    "repo": "BH-Builds/goonj-1-82M",
+                    "route": "/api/goonj",
+                    "sample_rate": 24000,
+                    "streaming": True,
+                    "languages": GOONJ_LANG,
+                },
             }
             models = []
             for mid, item in catalog_by_id.items():
@@ -1004,6 +1064,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/piper",
             "/api/parler",
             "/api/pocket",
+            "/api/goonj",
         ):
             self._send(404, b"Not found", "text/plain; charset=utf-8")
             return
@@ -1021,10 +1082,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, b"Text is required", "text/plain; charset=utf-8")
             return
         want_stream = bool(payload.get("stream"))
-        if want_stream and path not in ("/api/speech", "/api/piper", "/api/parler", "/api/pocket"):
+        if want_stream and path not in (
+            "/api/speech",
+            "/api/piper",
+            "/api/parler",
+            "/api/pocket",
+            "/api/goonj",
+        ):
             self._send(
                 400,
-                b"Streaming is only supported for Kokoro, Piper, Parler, and Pocket.",
+                b"Streaming is only supported for Kokoro, Piper, Parler, Pocket, and Goonj.",
                 "text/plain; charset=utf-8",
             )
             return
@@ -1059,6 +1126,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 self._send_sse(stream_pocket(text, voice, get_pocket()))
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+            return
+        if want_stream and path == "/api/goonj":
+            voice = str(payload.get("voice") or default_voice_for("goonj"))
+            lang = str(payload.get("language") or GOONJ_VOICE_LANG.get(voice, "a"))
+            pin_err = pin_voice_error(voice) or pin_language_error(lang)
+            if pin_err:
+                self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                return
+            try:
+                self._send_sse(stream_goonj(text, voice, get_goonj(), GOONJ_SPEED))
             except Exception as exc:  # noqa: BLE001
                 self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
             return
@@ -1128,6 +1207,15 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 audio = get_pocket().synthesize(text, voice)
                 filename = "pocket.wav"
+            elif path == "/api/goonj":
+                voice = str(payload.get("voice") or default_voice_for("goonj"))
+                lang = str(payload.get("language") or GOONJ_VOICE_LANG.get(voice, "a"))
+                pin_err = pin_voice_error(voice) or pin_language_error(lang)
+                if pin_err:
+                    self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                    return
+                audio = get_goonj().synthesize(text, voice, speed=GOONJ_SPEED)
+                filename = "goonj.wav"
             else:
                 voice = str(payload.get("voice") or default_voice_for("kokoro"))
                 lang = str(payload.get("language") or VOICE_LANG.get(voice, "a"))
@@ -1166,6 +1254,8 @@ def main() -> None:
         logger.info(f"UI: {base}/parler")
     elif ACTIVE_TTS_MODEL == "pocket":
         logger.info(f"API: {base}/api/pocket")
+    elif ACTIVE_TTS_MODEL == "goonj":
+        logger.info(f"API: {base}/api/goonj")
     ThreadingHTTPServer((UI_HOST, UI_PORT), Handler).serve_forever()
 
 
