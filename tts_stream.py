@@ -1,4 +1,4 @@
-"""Server-Sent Events streaming for Kokoro, Piper, Parler, Pocket, and Goonj (float32 PCM chunks)."""
+"""Server-Sent Events streaming for Kokoro and Goonj (float32 PCM chunks)."""
 
 from __future__ import annotations
 
@@ -54,63 +54,6 @@ def stream_kokoro(
         yield sse_bytes("error", {"message": "Kokoro returned no audio."})
         return
     yield sse_bytes("end", {"chunks": count})
-
-
-def stream_piper(text: str, voice_id: str, piper) -> Iterator[bytes]:
-    yield sse_bytes("meta", {"model": "piper", "sample_rate": 22050, "format": "f32le"})
-    count = 0
-    sample_rate = None
-    try:
-        for audio, rate in piper.iter_synthesize(text, voice_id):
-            sample_rate = rate
-            count += 1
-            yield sse_bytes(
-                "chunk",
-                {**encode_f32_chunk(audio), "sample_rate": rate},
-            )
-    except Exception as exc:  # noqa: BLE001
-        yield sse_bytes("error", {"message": str(exc)})
-        return
-    if count == 0:
-        yield sse_bytes("error", {"message": "Piper returned no audio."})
-        return
-    yield sse_bytes("end", {"chunks": count, "sample_rate": sample_rate})
-
-
-def stream_parler(text: str, voice: str, parler) -> Iterator[bytes]:
-    try:
-        audio, rate = parler.synthesize_array(text, voice)
-    except Exception as exc:  # noqa: BLE001
-        yield sse_bytes("error", {"message": str(exc)})
-        return
-    yield sse_bytes("meta", {"model": "parler", "sample_rate": rate, "format": "f32le"})
-    # Parler returns full utterance; slice into ~100 ms SSE chunks for LiveKit.
-    step = max(1, int(rate // 10))
-    count = 0
-    for start in range(0, audio.size, step):
-        count += 1
-        yield sse_bytes("chunk", encode_f32_chunk(audio[start : start + step]))
-    if count == 0:
-        yield sse_bytes("error", {"message": "Parler returned no audio."})
-        return
-    yield sse_bytes("end", {"chunks": count, "sample_rate": rate})
-
-
-def stream_pocket(text: str, voice: str, pocket) -> Iterator[bytes]:
-    rate = int(getattr(pocket, "sample_rate", 24000) or 24000)
-    yield sse_bytes("meta", {"model": "pocket", "sample_rate": rate, "format": "f32le"})
-    count = 0
-    try:
-        for audio in pocket.iter_audio(text, voice):
-            count += 1
-            yield sse_bytes("chunk", encode_f32_chunk(audio))
-    except Exception as exc:  # noqa: BLE001
-        yield sse_bytes("error", {"message": str(exc)})
-        return
-    if count == 0:
-        yield sse_bytes("error", {"message": "Pocket returned no audio."})
-        return
-    yield sse_bytes("end", {"chunks": count, "sample_rate": rate})
 
 
 def stream_goonj(text: str, voice: str, goonj, speed: float = 1.0) -> Iterator[bytes]:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Kokoro/Piper SSE streaming against a running server."""
+"""Verify Kokoro/Goonj SSE streaming against a running server."""
 
 from __future__ import annotations
 
@@ -62,32 +62,26 @@ def check_model(base: str, route: str, payload: dict, name: str) -> None:
 
 def main() -> None:
     base = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8765"
-    check_model(
-        base,
-        "/api/piper",
-        {"input": "Streaming test.", "voice": "en_US-lessac-medium"},
-        "Piper",
-    )
-    check_model(
-        base,
-        "/api/speech",
-        {"input": "Streaming test.", "voice": "af_heart", "language": "a"},
-        "Kokoro",
-    )
-    bad = urllib.request.Request(
-        base + "/api/speecht5",
-        data=json.dumps({"input": "Hi", "stream": True}).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(bad, timeout=30) as response:
-            if response.status != 400:
-                raise RuntimeError("SpeechT5 stream should return 400")
-    except urllib.error.HTTPError as exc:
-        if exc.code != 400:
-            raise
-    logger.info("OK SpeechT5 correctly rejects stream=true")
+    # Active engine only responds 200; the other returns 503 — test goonj by default.
+    active = json.loads(urllib.request.urlopen(base + "/api/active", timeout=30).read())
+    model = active.get("active_model")
+    if model == "goonj":
+        check_model(
+            base,
+            "/api/goonj",
+            {"input": "Streaming test.", "voice": "en_priya", "language": "a"},
+            "Goonj",
+        )
+    elif model == "kokoro":
+        check_model(
+            base,
+            "/api/speech",
+            {"input": "Streaming test.", "voice": "af_heart", "language": "a"},
+            "Kokoro",
+        )
+    else:
+        raise SystemExit(f"Unexpected active_model={model!r}")
+    logger.info("Streaming check passed for %s", model)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,5 @@
 kokoro>=0.9.4
 soundfile
-transformers>=4.46
-sentencepiece
-piper-tts
 colorlog>=6.8.0
-# Parler (Jetson): pip install git+https://github.com/huggingface/parler-tts.git
-# Pocket (Jetson): keep CUDA torch — pip install pocket-tts --no-deps && pip install missing deps except torch
+# Goonj uses the kokoro package + weights under GOONJ_MODEL_DIR
+# Jetson: keep the board CUDA torch; do not pip install desktop torch
