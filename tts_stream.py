@@ -1,4 +1,4 @@
-"""Server-Sent Events streaming for Kokoro and Goonj (float32 PCM chunks)."""
+"""Server-Sent Events streaming for Kokoro, Goonj, and Qwen (float32 PCM chunks)."""
 
 from __future__ import annotations
 
@@ -70,5 +70,26 @@ def stream_goonj(text: str, voice: str, goonj, speed: float = 1.0) -> Iterator[b
         return
     if count == 0:
         yield sse_bytes("error", {"message": "Goonj returned no audio."})
+        return
+    yield sse_bytes("end", {"chunks": count, "sample_rate": rate})
+
+
+def stream_qwen(text: str, qwen, language: str = "English") -> Iterator[bytes]:
+    """Pseudo-stream: full voice-clone generate, then emit ~20 ms f32le chunks."""
+    rate = int(getattr(qwen, "sample_rate", 24000) or 24000)
+    yield sse_bytes(
+        "meta",
+        {"model": "qwen", "sample_rate": rate, "format": "f32le", "voice": "hr_clone"},
+    )
+    count = 0
+    try:
+        for audio in qwen.iter_audio(text, language=language):
+            count += 1
+            yield sse_bytes("chunk", encode_f32_chunk(audio))
+    except Exception as exc:  # noqa: BLE001
+        yield sse_bytes("error", {"message": str(exc)})
+        return
+    if count == 0:
+        yield sse_bytes("error", {"message": "Qwen returned no audio."})
         return
     yield sse_bytes("end", {"chunks": count, "sample_rate": rate})

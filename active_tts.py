@@ -1,24 +1,24 @@
 """Single-active TTS engine policy.
 
-Only ACTIVE_TTS_MODEL is loaded into RAM. Switch by changing env and restarting
-(e.g. pm2 restart tts --update-env).
+AIAA-173: model/voice/language are hardcoded (no .env). Revert by checking out
+the previous branch.
 """
 
 from __future__ import annotations
 
 import gc
-import os
 from pathlib import Path
 
 from log_config import setup_logger
 
 logger = setup_logger(__name__)
 
-KNOWN_MODELS = ("kokoro", "goonj")
+KNOWN_MODELS = ("kokoro", "goonj", "qwen")
 
 ROUTE_TO_MODEL = {
     "/api/speech": "kokoro",
     "/api/goonj": "goonj",
+    "/api/qwen": "qwen",
 }
 
 MODEL_TO_ROUTE = {model: route for route, model in ROUTE_TO_MODEL.items()}
@@ -26,34 +26,39 @@ MODEL_TO_ROUTE = {model: route for route, model in ROUTE_TO_MODEL.items()}
 MODEL_SAMPLE_RATE = {
     "kokoro": 24000,
     "goonj": 24000,
+    "qwen": 24000,
 }
 
+# Hardcoded active engine for this branch (no env).
+MODEL_NAME = "qwen"
+VOICE_NAME = "hr_clone"
+LANGUAGE_NAME = "English"
+MODEL_ROUTE = MODEL_TO_ROUTE[MODEL_NAME]
+SAMPLE_RATE = MODEL_SAMPLE_RATE[MODEL_NAME]
 
-def _env(name: str, default: str = "") -> str:
-    return (os.environ.get(name) or default).strip()
+if MODEL_NAME not in KNOWN_MODELS:
+    raise SystemExit(
+        f"MODEL_NAME={MODEL_NAME!r} is invalid. Use one of: {', '.join(KNOWN_MODELS)}"
+    )
 
+ACTIVE_TTS_MODEL = MODEL_NAME
+ACTIVE_TTS_VOICE = VOICE_NAME
+ACTIVE_TTS_LANGUAGE = LANGUAGE_NAME
 
-def resolve_active_model() -> str:
-    raw = _env("ACTIVE_TTS_MODEL", "goonj").lower()
-    if raw not in KNOWN_MODELS:
-        raise SystemExit(
-            f"ACTIVE_TTS_MODEL={raw!r} is invalid. Use one of: {', '.join(KNOWN_MODELS)}"
-        )
-    return raw
-
-
-ACTIVE_TTS_MODEL = resolve_active_model()
-ACTIVE_TTS_VOICE = _env("ACTIVE_TTS_VOICE")
-ACTIVE_TTS_LANGUAGE = _env("ACTIVE_TTS_LANGUAGE")
+logger.info(
+    "Active TTS hardcoded model_name=%s voice_name=%s language_name=%s route=%s",
+    MODEL_NAME,
+    VOICE_NAME,
+    LANGUAGE_NAME,
+    MODEL_ROUTE,
+)
 
 
 def inactive_message(requested: str) -> str:
     return (
         f"Engine {requested!r} is not active. "
-        f"ACTIVE_TTS_MODEL={ACTIVE_TTS_MODEL!r}. "
-        f"Only the active engine is in RAM. "
-        f"Set ACTIVE_TTS_MODEL={requested} (and matching voice/language), "
-        f"then restart TTS: pm2 restart tts --update-env"
+        f"MODEL_NAME={ACTIVE_TTS_MODEL!r}. "
+        f"Only the active engine is in RAM on this branch."
     )
 
 
@@ -70,8 +75,7 @@ def ensure_route_active(path: str) -> str | None:
 def pin_voice_error(voice: str) -> str | None:
     if ACTIVE_TTS_VOICE and voice != ACTIVE_TTS_VOICE:
         return (
-            f"Voice {voice!r} is not the pinned ACTIVE_TTS_VOICE={ACTIVE_TTS_VOICE!r}. "
-            "Change ACTIVE_TTS_VOICE and restart TTS to switch (keeps one voice in RAM)."
+            f"Voice {voice!r} is not the pinned VOICE_NAME={ACTIVE_TTS_VOICE!r}."
         )
     return None
 
@@ -79,8 +83,7 @@ def pin_voice_error(voice: str) -> str | None:
 def pin_language_error(lang: str) -> str | None:
     if ACTIVE_TTS_LANGUAGE and lang != ACTIVE_TTS_LANGUAGE:
         return (
-            f"Language {lang!r} is not the pinned ACTIVE_TTS_LANGUAGE={ACTIVE_TTS_LANGUAGE!r}. "
-            "Change ACTIVE_TTS_LANGUAGE and restart TTS to switch."
+            f"Language {lang!r} is not the pinned LANGUAGE_NAME={ACTIVE_TTS_LANGUAGE!r}."
         )
     return None
 
@@ -115,6 +118,7 @@ def default_voice_for(model: str) -> str:
     return {
         "kokoro": "af_heart",
         "goonj": "en_priya",
+        "qwen": "hr_clone",
     }[model]
 
 
@@ -124,13 +128,16 @@ def default_language_for(model: str) -> str:
     return {
         "kokoro": "a",
         "goonj": "a",
+        "qwen": "English",
     }[model]
 
 
 def write_env_hint(root: Path) -> str:
     return (
-        f"ACTIVE_TTS_MODEL={ACTIVE_TTS_MODEL} "
-        f"ACTIVE_TTS_VOICE={ACTIVE_TTS_VOICE or '(any for this engine)'} "
-        f"ACTIVE_TTS_LANGUAGE={ACTIVE_TTS_LANGUAGE or '(any for this engine)'} "
+        f"MODEL_NAME={ACTIVE_TTS_MODEL} "
+        f"VOICE_NAME={ACTIVE_TTS_VOICE} "
+        f"LANGUAGE_NAME={ACTIVE_TTS_LANGUAGE} "
+        f"MODEL_ROUTE={MODEL_ROUTE} "
+        f"SAMPLE_RATE={SAMPLE_RATE} "
         f"models_dir={root / 'models'}"
     )

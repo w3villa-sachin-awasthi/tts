@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local TTS app. One ACTIVE_TTS_MODEL in RAM (kokoro or goonj)."""
+"""Local TTS app. One ACTIVE_TTS_MODEL in RAM (kokoro, goonj, or qwen)."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ from active_tts import (
     write_env_hint,
 )
 from goonj_engine import GOONJ_VOICES, VOICE_LANG as GOONJ_VOICE_LANG
-from tts_stream import stream_goonj, stream_kokoro
+from tts_stream import stream_goonj, stream_kokoro, stream_qwen
 
 LANGUAGES = [
     (
@@ -165,7 +165,7 @@ VOICE_LANG = {
     voice["id"]: item["code"] for item in CATALOG for voice in item["voices"]
 }
 
-DEVICE = detect_device() if ACTIVE_TTS_MODEL in ("kokoro", "goonj") else "cpu"
+DEVICE = detect_device() if ACTIVE_TTS_MODEL in ("kokoro", "goonj", "qwen") else "cpu"
 pipelines: dict[str, object] = {}
 _kokoro_model = None
 pipeline_lock = threading.Lock()
@@ -173,6 +173,7 @@ KOKORO_SPEED = float(os.environ.get("KOKORO_SPEED", "1.0"))
 KOKORO_SPLIT = r"[.!?।]\s+"
 GOONJ_SPEED = float(os.environ.get("GOONJ_SPEED", os.environ.get("KOKORO_SPEED", "1.0")))
 _goonj = None
+_qwen = None
 
 GOONJ_LANG = [
     {
@@ -195,6 +196,14 @@ GOONJ_LANG = [
     },
 ]
 
+QWEN_LANG = [
+    {
+        "code": "English",
+        "name": "English (voice clone)",
+        "voices": [{"id": "hr_clone", "label": "HR Clone (ref wav)"}],
+    },
+]
+
 MODELS = [
     {
         "id": "kokoro",
@@ -212,6 +221,14 @@ MODELS = [
         "streaming": True,
         "languages": GOONJ_LANG,
     },
+    {
+        "id": "qwen",
+        "name": "Qwen3-TTS-12Hz-0.6B-Base",
+        "route": "/api/qwen",
+        "note": "AIAA-173 voice clone from /data/qwen3-tts/ref. Hardcoded on this branch.",
+        "streaming": True,
+        "languages": QWEN_LANG,
+    },
 ]
 
 
@@ -225,6 +242,18 @@ def get_goonj():
         DEVICE = detect_device()
         _goonj = GoonjEngine(DEVICE)
     return _goonj
+
+
+def get_qwen():
+    global _qwen, DEVICE
+    if ACTIVE_TTS_MODEL != "qwen":
+        raise RuntimeError(inactive_message("qwen"))
+    if _qwen is None:
+        from qwen_engine import QwenEngine
+
+        DEVICE = detect_device()
+        _qwen = QwenEngine(DEVICE)
+    return _qwen
 
 
 def pipeline_for(lang: str):
@@ -260,6 +289,9 @@ def preload_active_engine() -> None:
     elif ACTIVE_TTS_MODEL == "goonj":
         logger.info(f"Preloading Goonj voice={voice} on {detect_device()}…")
         get_goonj().warm(voice)
+    elif ACTIVE_TTS_MODEL == "qwen":
+        logger.info(f"Preloading Qwen voice-clone on {detect_device()}…")
+        get_qwen().warm(voice)
 
 
 def synthesize(text: str, voice: str, lang: str) -> bytes:
@@ -609,6 +641,14 @@ class Handler(BaseHTTPRequestHandler):
                     "streaming": True,
                     "languages": GOONJ_LANG,
                 },
+                "qwen": {
+                    "id": "qwen",
+                    "repo": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+                    "route": "/api/qwen",
+                    "sample_rate": 24000,
+                    "streaming": True,
+                    "languages": QWEN_LANG,
+                },
             }
             models = []
             for mid, item in catalog_by_id.items():
@@ -624,8 +664,9 @@ class Handler(BaseHTTPRequestHandler):
                 "active_route": MODEL_TO_ROUTE[ACTIVE_TTS_MODEL],
                 "active_sample_rate": MODEL_SAMPLE_RATE[ACTIVE_TTS_MODEL],
                 "policy": (
-                    "Only ACTIVE_TTS_MODEL is loaded into RAM (kokoro or goonj). "
-                    "Change ACTIVE_TTS_* in /data/tts/.env then: pm2 restart tts --update-env"
+                    "Only MODEL_NAME is loaded into RAM. "
+                    "AIAA-173 hardcodes model_name=qwen (no .env). "
+                    "Revert branch to restore goonj/kokoro."
                 ),
                 "models": models,
             }
@@ -647,7 +688,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length", "0"))
-        if path not in ("/api/speech", "/api/goonj"):
+        if path not in ("/api/speech", "/api/goonj", "/api/qwen"):
             self._send(404, b"Not found", "text/plain; charset=utf-8")
             return
         inactive = ensure_route_active(path)
@@ -664,6 +705,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, b"Text is required", "text/plain; charset=utf-8")
             return
         want_stream = bool(payload.get("stream"))
+
+        if want_stream and path == "/api/qwen":
+            voice = str(payload.get("voice") or default_voice_for("qwen"))
+            lang = str(payload.get("language") or default_language_for("qwen"))
+            pin_err = pin_voice_error(voice) or pin_language_error(lang)
+            if pin_err:
+                self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                return
+            try:
+                self._send_sse(stream_qwen(text, get_qwen(), language=lang))
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+            return
 
         if want_stream and path == "/api/goonj":
             voice = str(payload.get("voice") or default_voice_for("goonj"))
@@ -703,7 +757,16 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            if path == "/api/goonj":
+            if path == "/api/qwen":
+                voice = str(payload.get("voice") or default_voice_for("qwen"))
+                lang = str(payload.get("language") or default_language_for("qwen"))
+                pin_err = pin_voice_error(voice) or pin_language_error(lang)
+                if pin_err:
+                    self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                    return
+                audio = get_qwen().synthesize(text, language=lang)
+                filename = "qwen.wav"
+            elif path == "/api/goonj":
                 voice = str(payload.get("voice") or default_voice_for("goonj"))
                 lang = str(payload.get("language") or GOONJ_VOICE_LANG.get(voice, "a"))
                 pin_err = pin_voice_error(voice) or pin_language_error(lang)
@@ -746,6 +809,8 @@ def main() -> None:
         logger.info(f"UI: {base}/")
     elif ACTIVE_TTS_MODEL == "goonj":
         logger.info(f"API: {base}/api/goonj  |  UI: {base}/goonj")
+    elif ACTIVE_TTS_MODEL == "qwen":
+        logger.info(f"API: {base}/api/qwen  (voice-clone HR ref)")
     ThreadingHTTPServer((UI_HOST, UI_PORT), Handler).serve_forever()
 
 

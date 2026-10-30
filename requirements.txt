@@ -3,3 +3,9 @@ soundfile
 colorlog>=6.8.0
 # Goonj uses the kokoro package + weights under GOONJ_MODEL_DIR
 # Jetson: keep the board CUDA torch; do not pip install desktop torch
+#
+# AIAA-173 Qwen3-TTS (voice clone) — install in the TTS or dedicated venv:
+#   pip install -U qwen-tts "numpy<2"
+#   pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://pypi.jetson-ai-lab.io/jp6/cu126
+# Model dir (hardcoded): /data/qwen3-tts/models/0.6B-Base
+# Ref wav + transcript: /data/qwen3-tts/ref/my_voice.wav , ref_text.txt
