@@ -1,44 +1,68 @@
 #!/usr/bin/env python3
-"""Local TTS app. Kokoro, SpeechT5, and Magpie each have their own route."""
+"""Local TTS app. One ACTIVE_TTS_MODEL in RAM (kokoro or goonj)."""
 
 from __future__ import annotations
 
-import atexit
 import io
 import json
 import os
-import subprocess
-import sys
 import threading
-import time
-import urllib.error
-import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from log_config import setup_logger
+
+logger = setup_logger(__name__)
+
 ROOT = Path(__file__).resolve().parent
+
+
+def _load_dotenv() -> None:
+    """Optional /data/tts/.env without requiring python-dotenv."""
+    path = ROOT / ".env"
+    if not path.is_file():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv()
+
 MODEL_DIR = ROOT / "models" / "huggingface"
-MAGPIE_MODEL_DIR = ROOT / "models"
 OUTPUT_DIR = ROOT / "output"
 UI_HOST = os.environ.get("TTS_HOST", "127.0.0.1")
 UI_PORT = int(os.environ.get("TTS_PORT", "8765"))
-MAGPIE_PORT = 8091
-MAGPIE_URL = f"http://127.0.0.1:{MAGPIE_PORT}"
 
 os.environ.setdefault("HF_HOME", str(MODEL_DIR))
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import numpy as np
 import soundfile as sf
-import torch
-from kokoro import KPipeline
 
-from piper_engine import VOICES as PIPER_VOICES
-from piper_engine import PiperEngine
-from speecht5_engine import SPEAKERS, SpeechT5Engine
-from voice_chat import turn_response
-
-VOICE_CHAT_PAGE = (ROOT / "voice_chat.html").read_text(encoding="utf-8")
+from active_tts import (
+    ACTIVE_TTS_LANGUAGE,
+    ACTIVE_TTS_MODEL,
+    ACTIVE_TTS_VOICE,
+    MODEL_SAMPLE_RATE,
+    MODEL_TO_ROUTE,
+    default_language_for,
+    default_voice_for,
+    detect_device,
+    ensure_route_active,
+    inactive_message,
+    pin_language_error,
+    pin_voice_error,
+    write_env_hint,
+)
+from goonj_engine import GOONJ_VOICES, VOICE_LANG as GOONJ_VOICE_LANG
+from tts_stream import stream_goonj, stream_kokoro
 
 LANGUAGES = [
     (
@@ -141,44 +165,35 @@ VOICE_LANG = {
     voice["id"]: item["code"] for item in CATALOG for voice in item["voices"]
 }
 
-if torch.cuda.is_available():
-    DEVICE = "cuda"
-elif torch.backends.mps.is_available():
-    DEVICE = "mps"
-else:
-    DEVICE = "cpu"
-pipelines: dict[str, KPipeline] = {}
+DEVICE = detect_device() if ACTIVE_TTS_MODEL in ("kokoro", "goonj") else "cpu"
+pipelines: dict[str, object] = {}
+_kokoro_model = None
 pipeline_lock = threading.Lock()
-speecht5 = SpeechT5Engine(DEVICE)
-SPEECHT5_LANG = [
+KOKORO_SPEED = float(os.environ.get("KOKORO_SPEED", "1.0"))
+KOKORO_SPLIT = r"[.!?।]\s+"
+GOONJ_SPEED = float(os.environ.get("GOONJ_SPEED", os.environ.get("KOKORO_SPEED", "1.0")))
+_goonj = None
+
+GOONJ_LANG = [
     {
-        "code": "en",
-        "name": "English",
-        "voices": [{"id": key, "label": label} for key, label in SPEAKERS],
-    }
+        "code": "a",
+        "name": "Indian English",
+        "voices": [
+            {"id": v, "label": v.replace("_", " ").title()}
+            for v in GOONJ_VOICES
+            if v.startswith("en_")
+        ],
+    },
+    {
+        "code": "h",
+        "name": "Hindi",
+        "voices": [
+            {"id": v, "label": v.replace("_", " ").title()}
+            for v in GOONJ_VOICES
+            if v.startswith("hi_") or v == "bed_hindi"
+        ],
+    },
 ]
-MAGPIE_VOICES = [
-    {"id": name, "label": name} for name in ("Aria", "Jason", "John", "Leo", "Sofia")
-]
-MAGPIE_LANG = [
-    {"code": code, "name": name, "voices": MAGPIE_VOICES}
-    for code, name in (
-        ("en-US", "English"),
-        ("es-ES", "Spanish"),
-        ("de-DE", "German"),
-        ("fr-FR", "French"),
-        ("it-IT", "Italian"),
-        ("vi-VN", "Vietnamese"),
-        ("hi-IN", "Hindi"),
-    )
-]
-PIPER_LANG = []
-for code, name, voice_id, label in PIPER_VOICES:
-    match = next((item for item in PIPER_LANG if item["code"] == code), None)
-    if match is None:
-        match = {"code": code, "name": name, "voices": []}
-        PIPER_LANG.append(match)
-    match["voices"].append({"id": voice_id, "label": label})
 
 MODELS = [
     {
@@ -186,185 +201,73 @@ MODELS = [
         "name": "Kokoro-82M",
         "route": "/api/speech",
         "note": "Multilingual. The voice has to match the language.",
+        "streaming": True,
         "languages": CATALOG,
     },
     {
-        "id": "speecht5",
-        "name": "SpeechT5",
-        "route": "/api/speecht5",
-        "note": "English only. This checkpoint was trained on LibriTTS.",
-        "languages": SPEECHT5_LANG,
-    },
-    {
-        "id": "magpie",
-        "name": "Magpie TTS 357M",
-        "route": "/api/magpie",
-        "note": "357 million parameters, not billion. v2602 on the M2 GPU.",
-        "languages": MAGPIE_LANG,
-    },
-    {
-        "id": "piper",
-        "name": "Piper ~20M",
-        "route": "/api/piper",
-        "note": "Medium Piper voices, about 15–20 million parameters each.",
-        "languages": PIPER_LANG,
+        "id": "goonj",
+        "name": "Goonj-1-82M",
+        "route": "/api/goonj",
+        "note": "Kokoro Indian EN/HI fine-tune. True streaming. Set GOONJ_MODEL_DIR.",
+        "streaming": True,
+        "languages": GOONJ_LANG,
     },
 ]
-piper = PiperEngine(ROOT / "models" / "piper")
-magpie_proc: subprocess.Popen | None = None
-magpie_lock = threading.Lock()
 
 
-def pipeline_for(lang: str) -> KPipeline:
-    if lang not in pipelines:
-        pipelines[lang] = KPipeline(lang_code=lang, device=DEVICE)
+def get_goonj():
+    global _goonj, DEVICE
+    if ACTIVE_TTS_MODEL != "goonj":
+        raise RuntimeError(inactive_message("goonj"))
+    if _goonj is None:
+        from goonj_engine import GoonjEngine
+
+        DEVICE = detect_device()
+        _goonj = GoonjEngine(DEVICE)
+    return _goonj
+
+
+def pipeline_for(lang: str):
+    """Kokoro: one model in RAM, shared by every language pipeline."""
+    global DEVICE, _kokoro_model
+    if ACTIVE_TTS_MODEL != "kokoro":
+        raise RuntimeError(inactive_message("kokoro"))
+    pin_err = pin_language_error(lang)
+    if pin_err:
+        raise RuntimeError(pin_err)
+    if lang in pipelines:
+        return pipelines[lang]
+    from kokoro import KModel, KPipeline
+
+    if _kokoro_model is None:
+        DEVICE = detect_device()
+        _kokoro_model = KModel().to(DEVICE).eval()
+    pipelines[lang] = KPipeline(lang_code=lang, model=_kokoro_model, device=DEVICE)
     return pipelines[lang]
 
 
-def _native_binary(path: Path) -> bool:
-    if not path.is_file() or not os.access(path, os.X_OK):
-        return False
-    try:
-        with path.open("rb") as handle:
-            header = handle.read(4)
-    except OSError:
-        return False
-    if sys.platform == "linux":
-        return header.startswith(b"\x7fELF")
-    if sys.platform == "darwin":
-        return header in (
-            b"\xfe\xed\xfa\xce",
-            b"\xce\xfa\xed\xfe",
-            b"\xfe\xed\xfa\xcf",
-            b"\xcf\xfa\xed\xfe",
-        )
-    return True
-
-
-def resolve_nemo_bin() -> Path | None:
-    override = os.environ.get("NEMO_SPEECH_BIN", "").strip()
-    if override:
-        path = Path(override)
-        return path if _native_binary(path) else None
-    for path in (
-        ROOT / "nemo-speech" / "bin" / "nemo-speech",
-        Path.home() / ".local" / "bin" / "nemo-speech",
-        ROOT / "vendor" / "nemo-speech" / "bin" / "nemo-speech",
-    ):
-        if _native_binary(path):
-            return path
-    return None
-
-
-def magpie_device() -> str:
-    override = os.environ.get("MAGPIE_DEVICE", "").strip().lower()
-    if override:
-        return override
-    if sys.platform == "darwin":
-        return "metal"
-    if torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
-
-
-def magpie_ready() -> bool:
-    try:
-        with urllib.request.urlopen(f"{MAGPIE_URL}/health", timeout=1) as response:
-            return response.status == 200
-    except (urllib.error.URLError, TimeoutError, OSError):
-        return False
-
-
-def start_magpie() -> None:
-    global magpie_proc
-    if magpie_ready():
-        return
-    nemo = resolve_nemo_bin()
-    if nemo is None:
-        raise RuntimeError(
-            "NeMo-Speech.cpp is not installed for this CPU/OS. "
-            "The vendor/ copy in git is macOS-only. On Jetson run: "
-            "bash scripts/jetson-install-nemo-speech.sh "
-            "then pm2 restart tts --update-env"
-        )
-    with magpie_lock:
-        if magpie_ready():
-            return
-        if magpie_proc and magpie_proc.poll() is None:
-            pass
-        else:
-            env = os.environ.copy()
-            env["NEMO_SPEECH_MODEL_DIR"] = str(MAGPIE_MODEL_DIR)
-            magpie_proc = subprocess.Popen(
-                [
-                    str(nemo),
-                    "serve",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    str(MAGPIE_PORT),
-                    "--tts-model",
-                    "magpie",
-                    "--device",
-                    magpie_device(),
-                    "--no-ui",
-                    "--tts.voice-name",
-                    "Sofia",
-                ],
-                cwd=ROOT,
-                env=env,
-            )
-        deadline = time.time() + 180
-        while time.time() < deadline:
-            if magpie_proc and magpie_proc.poll() is not None:
-                raise RuntimeError(f"Magpie exited with code {magpie_proc.returncode}")
-            if magpie_ready():
-                return
-            time.sleep(0.4)
-        raise RuntimeError("Magpie did not become ready.")
-
-
-def stop_magpie() -> None:
-    if magpie_proc and magpie_proc.poll() is None:
-        magpie_proc.terminate()
-
-
-atexit.register(stop_magpie)
-
-
-def synthesize_magpie(text: str, voice: str, lang: str) -> bytes:
-    if voice not in {item["id"] for item in MAGPIE_VOICES}:
-        raise ValueError("Unknown Magpie voice.")
-    if lang not in {item["code"] for item in MAGPIE_LANG}:
-        raise ValueError("That language is not in this Magpie build.")
-    start_magpie()
-    body = json.dumps(
-        {
-            "model": "magpie",
-            "input": text,
-            "voice": voice,
-            "language": lang,
-            "response_format": "wav",
-        }
-    ).encode()
-    request = urllib.request.Request(
-        f"{MAGPIE_URL}/v1/audio/speech",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+def preload_active_engine() -> None:
+    voice = default_voice_for(ACTIVE_TTS_MODEL)
+    lang = default_language_for(ACTIVE_TTS_MODEL)
+    logger.info(
+        f"Active TTS: {ACTIVE_TTS_MODEL} (disk cache under {ROOT / 'models'}; "
+        "only this engine loads into RAM)",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=180) as response:
-            return response.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode(errors="replace")
-        raise RuntimeError(detail or exc.reason) from exc
+    logger.info(write_env_hint(ROOT))
+    if ACTIVE_TTS_MODEL == "kokoro":
+        logger.info(f"Preloading Kokoro lang={lang} voice={voice} on {detect_device()}…")
+        pipeline_for(lang)
+    elif ACTIVE_TTS_MODEL == "goonj":
+        logger.info(f"Preloading Goonj voice={voice} on {detect_device()}…")
+        get_goonj().warm(voice)
 
 
 def synthesize(text: str, voice: str, lang: str) -> bytes:
     with pipeline_lock:
         chunks = []
-        for _graphemes, _phonemes, audio in pipeline_for(lang)(text, voice=voice, speed=1):
+        for _graphemes, _phonemes, audio in pipeline_for(lang)(
+            text, voice=voice, speed=KOKORO_SPEED, split_pattern=KOKORO_SPLIT
+        ):
             if audio is not None and len(audio):
                 chunks.append(np.asarray(audio, dtype=np.float32))
     if not chunks:
@@ -459,6 +362,9 @@ PAGE = """<!DOCTYPE html>
           <select id="voice"></select>
         </div>
       </div>
+      <label style="display:block;margin-top:12px;font-size:0.9rem;">
+        <input type="checkbox" id="stream" /> Stream audio (Kokoro, Goonj)
+      </label>
       <button id="speak" type="submit">Speak</button>
       <div id="status" class="status"></div>
     </form>
@@ -477,8 +383,11 @@ PAGE = """<!DOCTYPE html>
     const result = document.getElementById("result");
     const player = document.getElementById("player");
     const button = document.getElementById("speak");
+    const streamBox = document.getElementById("stream");
     const title = document.getElementById("title");
     const lead = document.getElementById("lead");
+    let streamCtx = null;
+    let streamNextTime = 0;
 
     function currentModel() {
       return models.find((item) => item.id === model.value) || models[0];
@@ -498,16 +407,75 @@ PAGE = """<!DOCTYPE html>
 
     const samples = {
       kokoro: "Hello from Kokoro on this Mac.",
-      speecht5: "Hello from SpeechT5 on this Mac.",
-      magpie: "Hello from Magpie on this Mac.",
-      piper: "Hello from Piper on this Mac.",
+      goonj: "Hello, thank you for calling. Your appointment is confirmed.",
     };
-    const paths = { kokoro: "/", speecht5: "/speecht5", magpie: "/magpie", piper: "/piper" };
+    const paths = { kokoro: "/", goonj: "/goonj" };
+
+    function syncStreamToggle() {
+      const canStream = !!currentModel().streaming;
+      streamBox.disabled = !canStream;
+      streamBox.parentElement.style.opacity = canStream ? "1" : "0.5";
+      if (!canStream) streamBox.checked = false;
+    }
+
+    function parseSseBlock(block) {
+      let event = "message";
+      let data = "";
+      for (const line of block.split("\\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        if (line.startsWith("data:")) data = line.slice(5).trim();
+      }
+      return { event, data: data ? JSON.parse(data) : {} };
+    }
+
+    async function playStreamingResponse(response) {
+      if (streamCtx) {
+        await streamCtx.close();
+        streamCtx = null;
+      }
+      streamCtx = new AudioContext();
+      streamNextTime = streamCtx.currentTime;
+      let sampleRate = 24000;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let pending = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        pending += decoder.decode(value, { stream: true });
+        let split;
+        while ((split = pending.indexOf("\\n\\n")) >= 0) {
+          const raw = pending.slice(0, split);
+          pending = pending.slice(split + 2);
+          const { event, data } = parseSseBlock(raw);
+          if (event === "meta" && data.sample_rate) sampleRate = data.sample_rate;
+          if (event === "error") throw new Error(data.message || "Stream error");
+          if (event === "chunk" && data.b64) {
+            const rate = data.sample_rate || sampleRate;
+            const binary = atob(data.b64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            const floats = new Float32Array(bytes.buffer);
+            const buffer = streamCtx.createBuffer(1, floats.length, rate);
+            buffer.copyToChannel(floats, 0);
+            const source = streamCtx.createBufferSource();
+            source.buffer = buffer;
+            source.connect(streamCtx.destination);
+            const start = Math.max(streamNextTime, streamCtx.currentTime);
+            source.start(start);
+            streamNextTime = start + buffer.duration;
+          }
+        }
+      }
+      result.classList.add("show");
+      player.removeAttribute("src");
+    }
 
     function fillLanguages() {
       const chosen = currentModel();
       title.textContent = chosen.name;
       lead.textContent = chosen.note;
+      syncStreamToggle();
       const text = document.getElementById("text");
       if (Object.values(samples).includes(text.value)) text.value = samples[chosen.id];
       language.replaceChildren();
@@ -544,7 +512,8 @@ PAGE = """<!DOCTYPE html>
       }
       button.disabled = true;
       status.className = "status";
-      status.textContent = "Synthesizing…";
+      const useStream = streamBox.checked && currentModel().streaming;
+      status.textContent = useStream ? "Streaming…" : "Synthesizing…";
       try {
         const chosen = currentModel();
         const response = await fetch(chosen.route, {
@@ -554,18 +523,24 @@ PAGE = """<!DOCTYPE html>
             input: text,
             voice: voice.value,
             language: language.value,
+            stream: useStream,
           }),
         });
         if (!response.ok) {
           const detail = await response.text();
           throw new Error(detail || response.statusText);
         }
-        const blob = await response.blob();
-        if (player.src.startsWith("blob:")) URL.revokeObjectURL(player.src);
-        player.src = URL.createObjectURL(blob);
-        result.classList.add("show");
-        await player.play();
-        status.textContent = "Ready.";
+        if (useStream) {
+          await playStreamingResponse(response);
+          status.textContent = "Stream finished.";
+        } else {
+          const blob = await response.blob();
+          if (player.src.startsWith("blob:")) URL.revokeObjectURL(player.src);
+          player.src = URL.createObjectURL(blob);
+          result.classList.add("show");
+          await player.play();
+          status.textContent = "Ready.";
+        }
       } catch (error) {
         status.textContent = error.message || "Synthesis failed.";
         status.className = "status error";
@@ -580,73 +555,90 @@ PAGE = """<!DOCTYPE html>
 
 
 def render_page(initial: str) -> bytes:
-    if initial not in {item["id"] for item in MODELS}:
-        initial = "kokoro"
-    html = PAGE.replace("__MODELS__", json.dumps(MODELS)).replace("__INITIAL__", json.dumps(initial))
-    return html.encode()
+    return (
+        PAGE.replace("__MODELS__", json.dumps(MODELS))
+        .replace("__INITIAL__", json.dumps(initial))
+        .encode()
+    )
 
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, fmt: str, *args: object) -> None:
-        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+    def log_message(self, fmt: str, *args) -> None:
+        logger.info("%s - %s", self.address_string(), fmt % args)
 
-    def _send(self, status: int, body: bytes, content_type: str) -> None:
-        self.send_response(status)
+    def _send(self, code: int, body: bytes, content_type: str) -> None:
+        self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_sse(self, events) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        for chunk in events:
+            self.wfile.write(chunk)
+            self.wfile.flush()
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html", "/kokoro"):
             self._send(200, render_page("kokoro"), "text/html; charset=utf-8")
             return
-        if path == "/speecht5":
-            self._send(200, render_page("speecht5"), "text/html; charset=utf-8")
-            return
-        if path == "/magpie":
-            self._send(200, render_page("magpie"), "text/html; charset=utf-8")
-            return
-        if path == "/piper":
-            self._send(200, render_page("piper"), "text/html; charset=utf-8")
-            return
-        if path == "/voice-chat":
-            self._send(200, VOICE_CHAT_PAGE.encode(), "text/html; charset=utf-8")
+        if path == "/goonj":
+            self._send(200, render_page("goonj"), "text/html; charset=utf-8")
             return
         if path == "/api/models":
+            catalog_by_id = {
+                "kokoro": {
+                    "id": "kokoro",
+                    "repo": "hexgrad/Kokoro-82M",
+                    "route": "/api/speech",
+                    "sample_rate": 24000,
+                    "streaming": True,
+                    "languages": CATALOG,
+                },
+                "goonj": {
+                    "id": "goonj",
+                    "repo": "BH-Builds/goonj-1-82M",
+                    "route": "/api/goonj",
+                    "sample_rate": 24000,
+                    "streaming": True,
+                    "languages": GOONJ_LANG,
+                },
+            }
+            models = []
+            for mid, item in catalog_by_id.items():
+                entry = dict(item)
+                entry["active"] = mid == ACTIVE_TTS_MODEL
+                entry["loaded_in_ram"] = mid == ACTIVE_TTS_MODEL
+                models.append(entry)
             payload = {
                 "device": DEVICE,
-                "models": [
-                    {
-                        "id": "kokoro",
-                        "repo": "hexgrad/Kokoro-82M",
-                        "route": "/api/speech",
-                        "sample_rate": 24000,
-                        "languages": CATALOG,
-                    },
-                    {
-                        "id": "speecht5",
-                        "repo": "microsoft/speecht5_tts",
-                        "route": "/api/speecht5",
-                        "sample_rate": 16000,
-                        "languages": SPEECHT5_LANG,
-                    },
-                    {
-                        "id": "magpie",
-                        "repo": "nvidia/magpie_tts_multilingual_357m",
-                        "route": "/api/magpie",
-                        "sample_rate": 22050,
-                        "languages": MAGPIE_LANG,
-                    },
-                    {
-                        "id": "piper",
-                        "repo": "rhasspy/piper-voices",
-                        "route": "/api/piper",
-                        "sample_rate": 22050,
-                        "languages": PIPER_LANG,
-                    },
-                ],
+                "active_model": ACTIVE_TTS_MODEL,
+                "active_voice": ACTIVE_TTS_VOICE or None,
+                "active_language": ACTIVE_TTS_LANGUAGE or None,
+                "active_route": MODEL_TO_ROUTE[ACTIVE_TTS_MODEL],
+                "active_sample_rate": MODEL_SAMPLE_RATE[ACTIVE_TTS_MODEL],
+                "policy": (
+                    "Only ACTIVE_TTS_MODEL is loaded into RAM (kokoro or goonj). "
+                    "Change ACTIVE_TTS_* in /data/tts/.env then: pm2 restart tts --update-env"
+                ),
+                "models": models,
+            }
+            self._send(200, json.dumps(payload).encode(), "application/json")
+            return
+        if path == "/api/active":
+            payload = {
+                "active_model": ACTIVE_TTS_MODEL,
+                "active_voice": ACTIVE_TTS_VOICE or default_voice_for(ACTIVE_TTS_MODEL),
+                "active_language": ACTIVE_TTS_LANGUAGE or default_language_for(ACTIVE_TTS_MODEL),
+                "route": MODEL_TO_ROUTE[ACTIVE_TTS_MODEL],
+                "sample_rate": MODEL_SAMPLE_RATE[ACTIVE_TTS_MODEL],
+                "device": DEVICE,
             }
             self._send(200, json.dumps(payload).encode(), "application/json")
             return
@@ -655,32 +647,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length", "0"))
-        if path == "/api/voice-chat/turn":
-            try:
-                payload = json.loads(self.rfile.read(length).decode())
-            except json.JSONDecodeError:
-                self._send(400, b"Invalid JSON", "text/plain; charset=utf-8")
-                return
-            user_text = str(payload.get("user_text", "")).strip()
-            voice = str(payload.get("voice") or "en_US-lessac-medium")
-            history = payload.get("messages") or []
-            if not isinstance(history, list):
-                self._send(400, b"messages must be a list", "text/plain; charset=utf-8")
-                return
-            ollama_model = payload.get("ollama_model")
-            if ollama_model is not None:
-                ollama_model = str(ollama_model).strip() or None
-            try:
-                result = turn_response(
-                    history, user_text, voice, piper, ollama_model=ollama_model
-                )
-            except Exception as exc:  # noqa: BLE001
-                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
-                return
-            self._send(200, json.dumps(result).encode(), "application/json")
-            return
-        if path not in ("/api/speech", "/api/speecht5", "/api/magpie", "/api/piper"):
+        if path not in ("/api/speech", "/api/goonj"):
             self._send(404, b"Not found", "text/plain; charset=utf-8")
+            return
+        inactive = ensure_route_active(path)
+        if inactive:
+            self._send(503, inactive.encode(), "text/plain; charset=utf-8")
             return
         try:
             payload = json.loads(self.rfile.read(length).decode())
@@ -691,25 +663,64 @@ class Handler(BaseHTTPRequestHandler):
         if not text:
             self._send(400, b"Text is required", "text/plain; charset=utf-8")
             return
+        want_stream = bool(payload.get("stream"))
+
+        if want_stream and path == "/api/goonj":
+            voice = str(payload.get("voice") or default_voice_for("goonj"))
+            lang = str(payload.get("language") or GOONJ_VOICE_LANG.get(voice, "a"))
+            pin_err = pin_voice_error(voice) or pin_language_error(lang)
+            if pin_err:
+                self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                return
+            try:
+                self._send_sse(stream_goonj(text, voice, get_goonj(), GOONJ_SPEED))
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+            return
+
+        if want_stream and path == "/api/speech":
+            voice = str(payload.get("voice") or default_voice_for("kokoro"))
+            lang = str(payload.get("language") or VOICE_LANG.get(voice, "a"))
+            pin_err = pin_voice_error(voice) or pin_language_error(lang)
+            if pin_err:
+                self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                return
+            try:
+                self._send_sse(
+                    stream_kokoro(
+                        text,
+                        voice,
+                        lang,
+                        pipeline_for,
+                        pipeline_lock,
+                        VOICE_LANG,
+                        KOKORO_SPEED,
+                        KOKORO_SPLIT,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+            return
+
         try:
-            if path == "/api/speecht5":
-                voice = str(payload.get("voice") or "slt")
-                audio = speecht5.synthesize(text, voice)
-                filename = "speecht5.wav"
-            elif path == "/api/magpie":
-                voice = str(payload.get("voice") or "Sofia")
-                lang = str(payload.get("language") or "en-US")
-                audio = synthesize_magpie(text, voice, lang)
-                filename = "magpie.wav"
-            elif path == "/api/piper":
-                voice = str(payload.get("voice") or "en_US-lessac-medium")
-                audio = piper.synthesize(text, voice)
-                filename = "piper.wav"
+            if path == "/api/goonj":
+                voice = str(payload.get("voice") or default_voice_for("goonj"))
+                lang = str(payload.get("language") or GOONJ_VOICE_LANG.get(voice, "a"))
+                pin_err = pin_voice_error(voice) or pin_language_error(lang)
+                if pin_err:
+                    self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                    return
+                audio = get_goonj().synthesize(text, voice, speed=GOONJ_SPEED)
+                filename = "goonj.wav"
             else:
-                voice = str(payload.get("voice") or "af_heart")
+                voice = str(payload.get("voice") or default_voice_for("kokoro"))
                 lang = str(payload.get("language") or VOICE_LANG.get(voice, "a"))
-                if voice not in VOICE_LANG or VOICE_LANG[voice] != lang:
-                    self._send(400, b"That voice does not match the selected language.", "text/plain; charset=utf-8")
+                pin_err = pin_voice_error(voice) or pin_language_error(lang)
+                if pin_err:
+                    self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                    return
+                if voice not in VOICE_LANG:
+                    self._send(400, b"Unknown Kokoro voice.", "text/plain; charset=utf-8")
                     return
                 audio = synthesize(text, voice, lang)
                 filename = "kokoro.wav"
@@ -722,15 +733,19 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    print(f"Loading Kokoro-82M on {DEVICE}…", flush=True)
-    pipeline_for("a")
-    base = f"http://{UI_HOST}:{UI_PORT}" if UI_HOST not in ("0.0.0.0", "::") else f"http://127.0.0.1:{UI_PORT}"
-    print(f"Listening on {UI_HOST}:{UI_PORT}", flush=True)
-    print(f"Kokoro: {base}/", flush=True)
-    print(f"SpeechT5: {base}/speecht5", flush=True)
-    print(f"Magpie: {base}/magpie", flush=True)
-    print(f"Piper: {base}/piper", flush=True)
-    print(f"Voice chat: {base}/voice-chat", flush=True)
+    preload_active_engine()
+    base = (
+        f"http://{UI_HOST}:{UI_PORT}"
+        if UI_HOST not in ("0.0.0.0", "::")
+        else f"http://127.0.0.1:{UI_PORT}"
+    )
+    logger.info(f"Listening on {UI_HOST}:{UI_PORT}")
+    logger.info(f"Active route: {base}{MODEL_TO_ROUTE[ACTIVE_TTS_MODEL]}")
+    logger.info(f"Status: {base}/api/active  |  catalog: {base}/api/models")
+    if ACTIVE_TTS_MODEL == "kokoro":
+        logger.info(f"UI: {base}/")
+    elif ACTIVE_TTS_MODEL == "goonj":
+        logger.info(f"API: {base}/api/goonj  |  UI: {base}/goonj")
     ThreadingHTTPServer((UI_HOST, UI_PORT), Handler).serve_forever()
 
 
