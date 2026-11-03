@@ -37,13 +37,13 @@ MODEL_SAMPLE_RATE = {
 # VOICE_NAME = "hr_clone"
 # LANGUAGE_NAME = "English"
 
-# MODEL_NAME = "goonj"
-# VOICE_NAME = "en_priya"
-# LANGUAGE_NAME = "a"
+# MODEL_NAME = "chatterbox"
+# VOICE_NAME = "ref_clone"
+# LANGUAGE_NAME = ""  # en / hi via API
 
-MODEL_NAME = "chatterbox"
-VOICE_NAME = "ref_clone"
-LANGUAGE_NAME = ""  # en / hi via API (not pinned)
+MODEL_NAME = "goonj"
+VOICE_NAME = "en_priya"
+LANGUAGE_NAME = "a"
 
 # MODEL_NAME = "kokoro"
 # VOICE_NAME = "af_heart"
