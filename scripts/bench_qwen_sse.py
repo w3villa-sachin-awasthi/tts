@@ -85,7 +85,7 @@ def main() -> None:
         "I'm calling from W three Villa Technologies. "
         "Please note that this call will be recorded."
     )
-    # Discard cold / graph capture.
+    print("Note: A/B STREAM_CHUNK_SIZE=4|8|12 and DTYPE_PREF in qwen_engine.py, then restart tts.")
     print("warmup…")
     bench(base, "Warmup one two three.")
     print("measure…")

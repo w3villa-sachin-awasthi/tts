@@ -30,11 +30,10 @@ SPEAKER_PT = Path("/data/qwen3-tts/ref/hr_speaker.pt")
 # Precision: "bf16" tried first when supported; always falls back to fp32.
 DTYPE_PREF = "fp32"  # set "bf16" to A/B on device; FP32 remains default-safe on Orin
 XVEC_ONLY = True
-# Jetson tables: larger chunk → better RTF, higher TTFA. A/B: 8 vs 12.
-STREAM_CHUNK_SIZE = 12
-# "full" = generate whole utterance then emit (smooth on RTF<1).
-# "stream" = yield during generation (lower TTFA, underruns if RTF<1).
-EMIT_MODE = "full"
+# A/B on device with scripts/bench_qwen_sse.py: 4 (lowest TTFA) / 8 / 12 (best RTF).
+STREAM_CHUNK_SIZE = 8
+# "stream" = incremental audio (lower TTFA). "full" = gen-then-emit (smooth, high TTFA).
+EMIT_MODE = "stream"
 
 # Used only when XVEC_ONLY is False (full ICL). Exact transcript of REF_AUDIO.
 REF_TEXT = (
