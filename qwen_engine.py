@@ -27,7 +27,7 @@ REF_AUDIO = Path("/data/qwen3-tts/ref/HR_VOICE.wav")
 SPEAKER_PT = Path("/data/qwen3-tts/ref/hr_speaker.pt")
 DTYPE = torch.float32  # float16 often NaNs on Jetson Orin
 XVEC_ONLY = True
-STREAM_CHUNK_SIZE = 4  # ~333ms/chunk; raise to 8 if RTF < 1 on NX
+STREAM_CHUNK_SIZE = 8  # ~333ms/chunk; raise to 8 if RTF < 1 on NX
 
 # Used only when XVEC_ONLY is False (full ICL). Exact transcript of REF_AUDIO.
 REF_TEXT = (
