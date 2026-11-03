@@ -611,9 +611,23 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
-        for chunk in events:
-            self.wfile.write(chunk)
-            self.wfile.flush()
+        try:
+            for chunk in events:
+                try:
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as exc:
+                    logger.info("SSE client disconnected (%s); stopping generation", exc)
+                    # Close generator so Qwen lock / GPU work can unwind.
+                    close = getattr(events, "close", None)
+                    if callable(close):
+                        close()
+                    return
+        except GeneratorExit:
+            return
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as exc:
+            logger.info("SSE client disconnected during stream (%s)", exc)
+            return
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
@@ -715,8 +729,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 self._send_sse(stream_qwen(text, get_qwen(), language=lang))
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                logger.info("SSE /api/qwen client gone")
             except Exception as exc:  # noqa: BLE001
-                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+                try:
+                    self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass
             return
 
         if want_stream and path == "/api/goonj":
@@ -728,8 +747,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 self._send_sse(stream_goonj(text, voice, get_goonj(), GOONJ_SPEED))
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                logger.info("SSE /api/goonj client gone")
             except Exception as exc:  # noqa: BLE001
-                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+                try:
+                    self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass
             return
 
         if want_stream and path == "/api/speech":
@@ -752,8 +776,13 @@ class Handler(BaseHTTPRequestHandler):
                         KOKORO_SPLIT,
                     )
                 )
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                logger.info("SSE /api/speech client gone")
             except Exception as exc:  # noqa: BLE001
-                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+                try:
+                    self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass
             return
 
         try:
