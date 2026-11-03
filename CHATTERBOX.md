@@ -2,12 +2,14 @@
 
 Hardcoded switch in `active_tts.py`:
 
-| Constant | Value |
-|----------|--------|
-| `MODEL_NAME` | `chatterbox` |
-| `VOICE_NAME` | `ref_clone` |
-| `LANGUAGE_NAME` | `` (empty — UI/API may send `en` or `hi`) |
-| Paths | `/data/chatterbox/ref/voice.wav`, HF cache `/data/chatterbox/hf-cache` |
+
+| Constant        | Value                                                                  |
+| --------------- | ---------------------------------------------------------------------- |
+| `MODEL_NAME`    | `chatterbox`                                                           |
+| `VOICE_NAME`    | `ref_clone`                                                            |
+| `LANGUAGE_NAME` | `` (empty — UI/API may send `en` or `hi`)                              |
+| Paths           | `/data/chatterbox/ref/voice.wav`, HF cache `/data/chatterbox/hf-cache` |
+
 
 **Streaming:** official API is full-waveform `generate()` only. Do not enable SSE for this model.
 
@@ -37,6 +39,8 @@ cd /data/tts && source /data/chatterbox/venv/bin/activate
 TTS_HOST=0.0.0.0 TTS_PORT=8766 python server.py
 ```
 
+
+
 ## API
 
 - `GET /health` — model / device
@@ -54,3 +58,4 @@ curl -s -X POST http://127.0.0.1:8766/api/chatterbox \
   --output /tmp/cb_en.wav
 python scripts/bench_chatterbox.py http://127.0.0.1:8766
 ```
+

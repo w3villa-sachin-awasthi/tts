@@ -17,3 +17,7 @@ colorlog>=6.8.0
 #   # if pip replaced torch, reinstall Jetson wheels again
 # Ref: /data/chatterbox/ref/voice.wav   HF: /data/chatterbox/hf-cache
 # See CHATTERBOX.md
+#
+# DhVaani-0.5 — SEPARATE venv (/data/dhvaani/venv), separate PM2 (port 8767):
+#   See DHVAANI.md
+# Ref: /data/dhvaani/ref/voice.wav + prompt.txt   HF: /data/dhvaani/hf-cache
