@@ -679,7 +679,7 @@ class Handler(BaseHTTPRequestHandler):
                 "active_sample_rate": MODEL_SAMPLE_RATE[ACTIVE_TTS_MODEL],
                 "policy": (
                     "Only MODEL_NAME is loaded into RAM. "
-                    "AIAA-173 hardcodes model_name=qwen (no .env). "
+                    "Model is hardcoded in active_tts.py (MODEL_NAME); not .env. "
                     "Revert branch to restore goonj/kokoro."
                 ),
                 "models": models,

@@ -29,10 +29,20 @@ MODEL_SAMPLE_RATE = {
     "qwen": 24000,
 }
 
-# Hardcoded active engine for this branch (no env).
-MODEL_NAME = "qwen"
-VOICE_NAME = "hr_clone"
-LANGUAGE_NAME = "English"
+# ── Switch TTS engine here (no ACTIVE_TTS_* .env). Restart: pm2 restart tts ──
+# Keep only ONE block active; comment the others.
+# MODEL_NAME = "qwen"
+# VOICE_NAME = "hr_clone"
+# LANGUAGE_NAME = "English"
+
+MODEL_NAME = "goonj"
+VOICE_NAME = "en_priya"
+LANGUAGE_NAME = "a"
+
+# MODEL_NAME = "kokoro"
+# VOICE_NAME = "af_heart"
+# LANGUAGE_NAME = "a"
+
 MODEL_ROUTE = MODEL_TO_ROUTE[MODEL_NAME]
 SAMPLE_RATE = MODEL_SAMPLE_RATE[MODEL_NAME]
 
