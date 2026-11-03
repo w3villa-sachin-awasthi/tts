@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -134,6 +135,13 @@ class QwenEngine:
     def iter_audio(self, text: str, language: str | None = None):
         """Yield float32 PCM chunks as they are generated."""
         lang = (language or LANGUAGE_NAME).strip() or LANGUAGE_NAME
+        t0 = time.perf_counter()
+        t_first: float | None = None
+        last_t: float | None = None
+        gap_sum = 0.0
+        gap_n = 0
+        total_samples = 0
+        n_chunks = 0
         with self.lock:
             for audio_chunk, sr, _timing in self.model.generate_voice_clone_streaming(
                 text=text,
@@ -142,11 +150,41 @@ class QwenEngine:
                 xvec_only=XVEC_ONLY,
                 chunk_size=STREAM_CHUNK_SIZE,
             ):
+                now = time.perf_counter()
                 if int(sr) != self.sample_rate:
                     self.sample_rate = int(sr)
                 chunk = np.asarray(audio_chunk, dtype=np.float32).reshape(-1)
-                if chunk.size:
-                    yield chunk
+                if not chunk.size:
+                    continue
+                if t_first is None:
+                    t_first = now
+                    logger.info(
+                        "Qwen TTFA_ms=%.0f chars=%d chunk_samples=%d",
+                        (t_first - t0) * 1000,
+                        len(text),
+                        chunk.size,
+                    )
+                elif last_t is not None:
+                    gap_sum += (now - last_t) * 1000
+                    gap_n += 1
+                last_t = now
+                total_samples += chunk.size
+                n_chunks += 1
+                yield chunk
+        wall = time.perf_counter() - t0
+        audio_s = total_samples / float(self.sample_rate) if total_samples else 0.0
+        avg_gap = (gap_sum / gap_n) if gap_n else 0.0
+        avg_chunk_ms = (1000.0 * audio_s / n_chunks) if n_chunks else 0.0
+        logger.info(
+            "Qwen done chunks=%d audio_s=%.2f wall_s=%.2f rtf=%.2f "
+            "avg_chunk_ms=%.0f avg_inter_chunk_gap_ms=%.0f",
+            n_chunks,
+            audio_s,
+            wall,
+            (audio_s / wall) if wall > 0 else 0.0,
+            avg_chunk_ms,
+            avg_gap,
+        )
 
     def synthesize(self, text: str, language: str | None = None) -> bytes:
         audio = self.synthesize_array(text, language=language)
