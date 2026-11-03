@@ -13,12 +13,13 @@ from log_config import setup_logger
 
 logger = setup_logger(__name__)
 
-KNOWN_MODELS = ("kokoro", "goonj", "qwen")
+KNOWN_MODELS = ("kokoro", "goonj", "qwen", "chatterbox")
 
 ROUTE_TO_MODEL = {
     "/api/speech": "kokoro",
     "/api/goonj": "goonj",
     "/api/qwen": "qwen",
+    "/api/chatterbox": "chatterbox",
 }
 
 MODEL_TO_ROUTE = {model: route for route, model in ROUTE_TO_MODEL.items()}
@@ -27,6 +28,7 @@ MODEL_SAMPLE_RATE = {
     "kokoro": 24000,
     "goonj": 24000,
     "qwen": 24000,
+    "chatterbox": 24000,
 }
 
 # ── Switch TTS engine here (no ACTIVE_TTS_* .env). Restart: pm2 restart tts ──
@@ -34,6 +36,10 @@ MODEL_SAMPLE_RATE = {
 # MODEL_NAME = "qwen"
 # VOICE_NAME = "hr_clone"
 # LANGUAGE_NAME = "English"
+
+# MODEL_NAME = "chatterbox"
+# VOICE_NAME = "ref_clone"
+# LANGUAGE_NAME = ""  # en / hi via API
 
 MODEL_NAME = "goonj"
 VOICE_NAME = "en_priya"
@@ -129,6 +135,7 @@ def default_voice_for(model: str) -> str:
         "kokoro": "af_heart",
         "goonj": "en_priya",
         "qwen": "hr_clone",
+        "chatterbox": "ref_clone",
     }[model]
 
 
@@ -139,6 +146,7 @@ def default_language_for(model: str) -> str:
         "kokoro": "a",
         "goonj": "a",
         "qwen": "English",
+        "chatterbox": "en",
     }[model]
 
 

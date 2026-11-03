@@ -10,3 +10,10 @@ colorlog>=6.8.0
 #   pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://pypi.jetson-ai-lab.io/jp6/cu126
 # Model: /data/qwen3-tts/models/0.6B-Base
 # Ref:   /data/qwen3-tts/ref/HR_VOICE.wav  (embedding cached to hr_speaker.pt)
+#
+# Chatterbox Multilingual V3 — use a SEPARATE venv (/data/chatterbox/venv):
+#   pip install torch torchaudio --index-url https://pypi.jetson-ai-lab.io/jp6/cu126
+#   pip install chatterbox-tts soundfile colorlog
+#   # if pip replaced torch, reinstall Jetson wheels again
+# Ref: /data/chatterbox/ref/voice.wav   HF: /data/chatterbox/hf-cache
+# See CHATTERBOX.md

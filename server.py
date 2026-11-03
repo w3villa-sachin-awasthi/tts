@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local TTS app. One ACTIVE_TTS_MODEL in RAM (kokoro, goonj, or qwen)."""
+"""Local TTS app. One ACTIVE_TTS_MODEL in RAM (kokoro, goonj, qwen, chatterbox)."""
 
 from __future__ import annotations
 
@@ -165,7 +165,7 @@ VOICE_LANG = {
     voice["id"]: item["code"] for item in CATALOG for voice in item["voices"]
 }
 
-DEVICE = detect_device() if ACTIVE_TTS_MODEL in ("kokoro", "goonj", "qwen") else "cpu"
+DEVICE = detect_device() if ACTIVE_TTS_MODEL in ("kokoro", "goonj", "qwen", "chatterbox") else "cpu"
 pipelines: dict[str, object] = {}
 _kokoro_model = None
 pipeline_lock = threading.Lock()
@@ -174,6 +174,7 @@ KOKORO_SPLIT = r"[.!?।]\s+"
 GOONJ_SPEED = float(os.environ.get("GOONJ_SPEED", os.environ.get("KOKORO_SPEED", "1.0")))
 _goonj = None
 _qwen = None
+_chatterbox = None
 
 GOONJ_LANG = [
     {
@@ -204,6 +205,19 @@ QWEN_LANG = [
     },
 ]
 
+CHATTERBOX_LANG = [
+    {
+        "code": "en",
+        "name": "English",
+        "voices": [{"id": "ref_clone", "label": "Ref clone (voice.wav)"}],
+    },
+    {
+        "code": "hi",
+        "name": "Hindi",
+        "voices": [{"id": "ref_clone", "label": "Ref clone (voice.wav)"}],
+    },
+]
+
 MODELS = [
     {
         "id": "kokoro",
@@ -228,6 +242,14 @@ MODELS = [
         "note": "AIAA-173 voice clone from /data/qwen3-tts/ref. Hardcoded on this branch.",
         "streaming": True,
         "languages": QWEN_LANG,
+    },
+    {
+        "id": "chatterbox",
+        "name": "Chatterbox Multilingual V3",
+        "route": "/api/chatterbox",
+        "note": "Voice clone from /data/chatterbox/ref/voice.wav. Full WAV only (no incremental streaming).",
+        "streaming": False,
+        "languages": CHATTERBOX_LANG,
     },
 ]
 
@@ -254,6 +276,18 @@ def get_qwen():
         DEVICE = detect_device()
         _qwen = QwenEngine(DEVICE)
     return _qwen
+
+
+def get_chatterbox():
+    global _chatterbox, DEVICE
+    if ACTIVE_TTS_MODEL != "chatterbox":
+        raise RuntimeError(inactive_message("chatterbox"))
+    if _chatterbox is None:
+        from chatterbox_engine import ChatterboxEngine
+
+        DEVICE = detect_device()
+        _chatterbox = ChatterboxEngine(DEVICE)
+    return _chatterbox
 
 
 def pipeline_for(lang: str):
@@ -292,6 +326,9 @@ def preload_active_engine() -> None:
     elif ACTIVE_TTS_MODEL == "qwen":
         logger.info(f"Preloading Qwen voice-clone on {detect_device()}…")
         get_qwen().warm(voice)
+    elif ACTIVE_TTS_MODEL == "chatterbox":
+        logger.info(f"Preloading Chatterbox Multilingual V3 on {detect_device()}…")
+        get_chatterbox().warm(voice)
 
 
 def synthesize(text: str, voice: str, lang: str) -> bytes:
@@ -440,8 +477,9 @@ PAGE = """<!DOCTYPE html>
     const samples = {
       kokoro: "Hello from Kokoro on this Mac.",
       goonj: "Hello, thank you for calling. Your appointment is confirmed.",
+      chatterbox: "Hello, thank you for calling. Your appointment is confirmed.",
     };
-    const paths = { kokoro: "/", goonj: "/goonj" };
+    const paths = { kokoro: "/", goonj: "/goonj", chatterbox: "/chatterbox" };
 
     function syncStreamToggle() {
       const canStream = !!currentModel().streaming;
@@ -637,6 +675,41 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/goonj":
             self._send(200, render_page("goonj"), "text/html; charset=utf-8")
             return
+        if path == "/chatterbox":
+            self._send(200, render_page("chatterbox"), "text/html; charset=utf-8")
+            return
+        if path == "/health":
+            cuda_ok = False
+            try:
+                import torch
+
+                cuda_ok = bool(torch.cuda.is_available())
+            except Exception:
+                pass
+            loaded = (
+                (ACTIVE_TTS_MODEL == "chatterbox" and _chatterbox is not None)
+                or (ACTIVE_TTS_MODEL == "qwen" and _qwen is not None)
+                or (ACTIVE_TTS_MODEL == "goonj" and _goonj is not None)
+                or (ACTIVE_TTS_MODEL == "kokoro" and _kokoro_model is not None)
+            )
+            payload = {
+                "ok": True,
+                "active_model": ACTIVE_TTS_MODEL,
+                "device": DEVICE,
+                "cuda": cuda_ok,
+                "loaded": loaded,
+            }
+            self._send(200, json.dumps(payload).encode(), "application/json")
+            return
+        if path == "/voices":
+            from chatterbox_engine import REF_AUDIO, REF_DIR
+
+            voices = []
+            if REF_DIR.is_dir():
+                for p in sorted(REF_DIR.glob("*.wav")):
+                    voices.append({"id": p.stem, "path": str(p), "active": p == REF_AUDIO})
+            self._send(200, json.dumps({"voices": voices}).encode(), "application/json")
+            return
         if path == "/api/models":
             catalog_by_id = {
                 "kokoro": {
@@ -662,6 +735,14 @@ class Handler(BaseHTTPRequestHandler):
                     "sample_rate": 24000,
                     "streaming": True,
                     "languages": QWEN_LANG,
+                },
+                "chatterbox": {
+                    "id": "chatterbox",
+                    "repo": "ResembleAI/chatterbox",
+                    "route": "/api/chatterbox",
+                    "sample_rate": 24000,
+                    "streaming": False,
+                    "languages": CHATTERBOX_LANG,
                 },
             }
             models = []
@@ -702,7 +783,34 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length", "0"))
-        if path not in ("/api/speech", "/api/goonj", "/api/qwen"):
+
+        # Upload reference WAV for Chatterbox (raw body).
+        if path in ("/api/chatterbox/voice", "/voices"):
+            inactive = ensure_route_active("/api/chatterbox")
+            if inactive:
+                self._send(503, inactive.encode(), "text/plain; charset=utf-8")
+                return
+            raw = self.rfile.read(length)
+            if len(raw) < 44:
+                self._send(400, b"WAV body required", "text/plain; charset=utf-8")
+                return
+            from chatterbox_engine import REF_AUDIO, REF_DIR
+
+            REF_DIR.mkdir(parents=True, exist_ok=True)
+            REF_AUDIO.write_bytes(raw)
+            try:
+                get_chatterbox().set_reference(REF_AUDIO)
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+                return
+            self._send(
+                200,
+                json.dumps({"ok": True, "path": str(REF_AUDIO), "bytes": len(raw)}).encode(),
+                "application/json",
+            )
+            return
+
+        if path not in ("/api/speech", "/api/goonj", "/api/qwen", "/api/chatterbox"):
             self._send(404, b"Not found", "text/plain; charset=utf-8")
             return
         inactive = ensure_route_active(path)
@@ -719,6 +827,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, b"Text is required", "text/plain; charset=utf-8")
             return
         want_stream = bool(payload.get("stream"))
+
+        # Chatterbox has no genuine incremental generation — reject stream=true.
+        if want_stream and path == "/api/chatterbox":
+            self._send(
+                400,
+                b"Chatterbox Multilingual V3 has no incremental decode; use stream=false.",
+                "text/plain; charset=utf-8",
+            )
+            return
 
         if want_stream and path == "/api/qwen":
             voice = str(payload.get("voice") or default_voice_for("qwen"))
@@ -786,7 +903,16 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            if path == "/api/qwen":
+            if path == "/api/chatterbox":
+                voice = str(payload.get("voice") or default_voice_for("chatterbox"))
+                lang = str(payload.get("language") or default_language_for("chatterbox"))
+                pin_err = pin_voice_error(voice)
+                if pin_err:
+                    self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                    return
+                audio = get_chatterbox().synthesize(text, language=lang)
+                filename = "chatterbox.wav"
+            elif path == "/api/qwen":
                 voice = str(payload.get("voice") or default_voice_for("qwen"))
                 lang = str(payload.get("language") or default_language_for("qwen"))
                 pin_err = pin_voice_error(voice) or pin_language_error(lang)
@@ -840,6 +966,8 @@ def main() -> None:
         logger.info(f"API: {base}/api/goonj  |  UI: {base}/goonj")
     elif ACTIVE_TTS_MODEL == "qwen":
         logger.info(f"API: {base}/api/qwen  (voice-clone HR ref)")
+    elif ACTIVE_TTS_MODEL == "chatterbox":
+        logger.info(f"API: {base}/api/chatterbox  |  UI: {base}/chatterbox  |  voice upload: POST /api/chatterbox/voice")
     ThreadingHTTPServer((UI_HOST, UI_PORT), Handler).serve_forever()
 
 
