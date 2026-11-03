@@ -1,10 +1,9 @@
-"""Server-Sent Events streaming for Kokoro, Goonj, and Qwen (float32 PCM chunks)."""
+"""Server-Sent Events streaming for Kokoro and Goonj (float32 PCM chunks)."""
 
 from __future__ import annotations
 
 import base64
 import json
-import time
 from collections.abc import Iterator
 
 import numpy as np
@@ -73,50 +72,3 @@ def stream_goonj(text: str, voice: str, goonj, speed: float = 1.0) -> Iterator[b
         yield sse_bytes("error", {"message": "Goonj returned no audio."})
         return
     yield sse_bytes("end", {"chunks": count, "sample_rate": rate})
-
-
-def stream_qwen(text: str, qwen, language: str = "English") -> Iterator[bytes]:
-    """Stream Qwen voice-clone chunks as f32le SSE events."""
-    rate = int(getattr(qwen, "sample_rate", 24000) or 24000)
-    yield sse_bytes(
-        "meta",
-        {"model": "qwen", "sample_rate": rate, "format": "f32le", "voice": "hr_clone"},
-    )
-    count = 0
-    total_samples = 0
-    t0 = time.perf_counter()
-    t_first: float | None = None
-    try:
-        for audio in qwen.iter_audio(text, language=language):
-            now = time.perf_counter()
-            if t_first is None:
-                t_first = now
-            samples = int(np.asarray(audio).size)
-            total_samples += samples
-            count += 1
-            yield sse_bytes("chunk", encode_f32_chunk(audio))
-    except Exception as exc:  # noqa: BLE001
-        yield sse_bytes("error", {"message": str(exc)})
-        return
-    if count == 0:
-        yield sse_bytes("error", {"message": "Qwen returned no audio."})
-        return
-    wall = time.perf_counter() - t0
-    audio_s = total_samples / float(rate) if rate else 0.0
-    logger.info(
-        "SSE qwen chunks=%d audio_s=%.2f wall_s=%.2f ttfa_ms=%.0f rtf=%.2f",
-        count,
-        audio_s,
-        wall,
-        ((t_first - t0) * 1000) if t_first else -1,
-        (audio_s / wall) if wall > 0 else 0.0,
-    )
-    yield sse_bytes(
-        "end",
-        {
-            "chunks": count,
-            "sample_rate": rate,
-            "audio_s": round(audio_s, 3),
-            "wall_s": round(wall, 3),
-        },
-    )

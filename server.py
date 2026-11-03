@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local TTS app. One ACTIVE_TTS_MODEL in RAM (kokoro, goonj, qwen, chatterbox, dhvaani)."""
+"""Local TTS app. One ACTIVE_TTS_MODEL in RAM (kokoro | goonj)."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ from active_tts import (
     write_env_hint,
 )
 from goonj_engine import GOONJ_VOICES, VOICE_LANG as GOONJ_VOICE_LANG
-from tts_stream import stream_goonj, stream_kokoro, stream_qwen
+from tts_stream import stream_goonj, stream_kokoro
 
 LANGUAGES = [
     (
@@ -165,7 +165,7 @@ VOICE_LANG = {
     voice["id"]: item["code"] for item in CATALOG for voice in item["voices"]
 }
 
-DEVICE = detect_device() if ACTIVE_TTS_MODEL in ("kokoro", "goonj", "qwen", "chatterbox", "dhvaani") else "cpu"
+DEVICE = detect_device() if ACTIVE_TTS_MODEL in ("kokoro", "goonj") else "cpu"
 pipelines: dict[str, object] = {}
 _kokoro_model = None
 pipeline_lock = threading.Lock()
@@ -173,9 +173,6 @@ KOKORO_SPEED = float(os.environ.get("KOKORO_SPEED", "1.0"))
 KOKORO_SPLIT = r"[.!?।]\s+"
 GOONJ_SPEED = float(os.environ.get("GOONJ_SPEED", os.environ.get("KOKORO_SPEED", "1.0")))
 _goonj = None
-_qwen = None
-_chatterbox = None
-_dhvaani = None
 
 GOONJ_LANG = [
     {
@@ -198,40 +195,6 @@ GOONJ_LANG = [
     },
 ]
 
-QWEN_LANG = [
-    {
-        "code": "English",
-        "name": "English (voice clone)",
-        "voices": [{"id": "hr_clone", "label": "HR Clone (ref wav)"}],
-    },
-]
-
-CHATTERBOX_LANG = [
-    {
-        "code": "en",
-        "name": "English",
-        "voices": [{"id": "ref_clone", "label": "Ref clone (voice.wav)"}],
-    },
-    {
-        "code": "hi",
-        "name": "Hindi",
-        "voices": [{"id": "ref_clone", "label": "Ref clone (voice.wav)"}],
-    },
-]
-
-DHVAANI_LANG = [
-    {
-        "code": "hi",
-        "name": "Hindi",
-        "voices": [{"id": "ref_clone", "label": "Ref clone (voice.wav + prompt.txt)"}],
-    },
-    {
-        "code": "en",
-        "name": "English",
-        "voices": [{"id": "ref_clone", "label": "Ref clone (voice.wav + prompt.txt)"}],
-    },
-]
-
 MODELS = [
     {
         "id": "kokoro",
@@ -249,30 +212,6 @@ MODELS = [
         "streaming": True,
         "languages": GOONJ_LANG,
     },
-    {
-        "id": "qwen",
-        "name": "Qwen3-TTS-12Hz-0.6B-Base",
-        "route": "/api/qwen",
-        "note": "AIAA-173 voice clone from /data/qwen3-tts/ref. Hardcoded on this branch.",
-        "streaming": True,
-        "languages": QWEN_LANG,
-    },
-    {
-        "id": "chatterbox",
-        "name": "Chatterbox Multilingual V3",
-        "route": "/api/chatterbox",
-        "note": "Voice clone from /data/chatterbox/ref/voice.wav. Full WAV only (no incremental streaming).",
-        "streaming": False,
-        "languages": CHATTERBOX_LANG,
-    },
-    {
-        "id": "dhvaani",
-        "name": "DhVaani-0.5",
-        "route": "/api/dhvaani",
-        "note": "Indic zero-shot clone from /data/dhvaani/ref/{voice.wav,prompt.txt}. Full WAV only.",
-        "streaming": False,
-        "languages": DHVAANI_LANG,
-    },
 ]
 
 
@@ -286,42 +225,6 @@ def get_goonj():
         DEVICE = detect_device()
         _goonj = GoonjEngine(DEVICE)
     return _goonj
-
-
-def get_qwen():
-    global _qwen, DEVICE
-    if ACTIVE_TTS_MODEL != "qwen":
-        raise RuntimeError(inactive_message("qwen"))
-    if _qwen is None:
-        from qwen_engine import QwenEngine
-
-        DEVICE = detect_device()
-        _qwen = QwenEngine(DEVICE)
-    return _qwen
-
-
-def get_chatterbox():
-    global _chatterbox, DEVICE
-    if ACTIVE_TTS_MODEL != "chatterbox":
-        raise RuntimeError(inactive_message("chatterbox"))
-    if _chatterbox is None:
-        from chatterbox_engine import ChatterboxEngine
-
-        DEVICE = detect_device()
-        _chatterbox = ChatterboxEngine(DEVICE)
-    return _chatterbox
-
-
-def get_dhvaani():
-    global _dhvaani, DEVICE
-    if ACTIVE_TTS_MODEL != "dhvaani":
-        raise RuntimeError(inactive_message("dhvaani"))
-    if _dhvaani is None:
-        from dhvaani_engine import DhVaaniEngine
-
-        DEVICE = detect_device()
-        _dhvaani = DhVaaniEngine(DEVICE)
-    return _dhvaani
 
 
 def pipeline_for(lang: str):
@@ -357,15 +260,6 @@ def preload_active_engine() -> None:
     elif ACTIVE_TTS_MODEL == "goonj":
         logger.info(f"Preloading Goonj voice={voice} on {detect_device()}…")
         get_goonj().warm(voice)
-    elif ACTIVE_TTS_MODEL == "qwen":
-        logger.info(f"Preloading Qwen voice-clone on {detect_device()}…")
-        get_qwen().warm(voice)
-    elif ACTIVE_TTS_MODEL == "chatterbox":
-        logger.info(f"Preloading Chatterbox Multilingual V3 on {detect_device()}…")
-        get_chatterbox().warm(voice)
-    elif ACTIVE_TTS_MODEL == "dhvaani":
-        logger.info(f"Preloading DhVaani-0.5 on {detect_device()}…")
-        get_dhvaani().warm(voice)
 
 
 def synthesize(text: str, voice: str, lang: str) -> bytes:
@@ -514,10 +408,8 @@ PAGE = """<!DOCTYPE html>
     const samples = {
       kokoro: "Hello from Kokoro on this Mac.",
       goonj: "Hello, thank you for calling. Your appointment is confirmed.",
-      chatterbox: "Hello, thank you for calling. Your appointment is confirmed.",
-      dhvaani: "नमस्ते, आपकी अपॉइंटमेंट कन्फर्म हो गई है।",
     };
-    const paths = { kokoro: "/", goonj: "/goonj", chatterbox: "/chatterbox", dhvaani: "/dhvaani" };
+    const paths = { kokoro: "/", goonj: "/goonj" };
 
     function syncStreamToggle() {
       const canStream = !!currentModel().streaming;
@@ -694,7 +586,6 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as exc:
                     logger.info("SSE client disconnected (%s); stopping generation", exc)
-                    # Close generator so Qwen lock / GPU work can unwind.
                     close = getattr(events, "close", None)
                     if callable(close):
                         close()
@@ -713,12 +604,6 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/goonj":
             self._send(200, render_page("goonj"), "text/html; charset=utf-8")
             return
-        if path == "/chatterbox":
-            self._send(200, render_page("chatterbox"), "text/html; charset=utf-8")
-            return
-        if path == "/dhvaani":
-            self._send(200, render_page("dhvaani"), "text/html; charset=utf-8")
-            return
         if path == "/health":
             cuda_ok = False
             try:
@@ -728,10 +613,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             loaded = (
-                (ACTIVE_TTS_MODEL == "dhvaani" and _dhvaani is not None)
-                or (ACTIVE_TTS_MODEL == "chatterbox" and _chatterbox is not None)
-                or (ACTIVE_TTS_MODEL == "qwen" and _qwen is not None)
-                or (ACTIVE_TTS_MODEL == "goonj" and _goonj is not None)
+                (ACTIVE_TTS_MODEL == "goonj" and _goonj is not None)
                 or (ACTIVE_TTS_MODEL == "kokoro" and _kokoro_model is not None)
             )
             payload = {
@@ -742,15 +624,6 @@ class Handler(BaseHTTPRequestHandler):
                 "loaded": loaded,
             }
             self._send(200, json.dumps(payload).encode(), "application/json")
-            return
-        if path == "/voices":
-            from chatterbox_engine import REF_AUDIO, REF_DIR
-
-            voices = []
-            if REF_DIR.is_dir():
-                for p in sorted(REF_DIR.glob("*.wav")):
-                    voices.append({"id": p.stem, "path": str(p), "active": p == REF_AUDIO})
-            self._send(200, json.dumps({"voices": voices}).encode(), "application/json")
             return
         if path == "/api/models":
             catalog_by_id = {
@@ -770,30 +643,6 @@ class Handler(BaseHTTPRequestHandler):
                     "streaming": True,
                     "languages": GOONJ_LANG,
                 },
-                "qwen": {
-                    "id": "qwen",
-                    "repo": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-                    "route": "/api/qwen",
-                    "sample_rate": 24000,
-                    "streaming": True,
-                    "languages": QWEN_LANG,
-                },
-                "chatterbox": {
-                    "id": "chatterbox",
-                    "repo": "ResembleAI/chatterbox",
-                    "route": "/api/chatterbox",
-                    "sample_rate": 24000,
-                    "streaming": False,
-                    "languages": CHATTERBOX_LANG,
-                },
-                "dhvaani": {
-                    "id": "dhvaani",
-                    "repo": "ARTPARK-IISc/DhVaani-0.5",
-                    "route": "/api/dhvaani",
-                    "sample_rate": 24000,
-                    "streaming": False,
-                    "languages": DHVAANI_LANG,
-                },
             }
             models = []
             for mid, item in catalog_by_id.items():
@@ -810,8 +659,7 @@ class Handler(BaseHTTPRequestHandler):
                 "active_sample_rate": MODEL_SAMPLE_RATE[ACTIVE_TTS_MODEL],
                 "policy": (
                     "Only MODEL_NAME is loaded into RAM. "
-                    "Model is hardcoded in active_tts.py (MODEL_NAME); not .env. "
-                    "Revert branch to restore goonj/kokoro."
+                    "Model is hardcoded in active_tts.py (MODEL_NAME); not .env."
                 ),
                 "models": models,
             }
@@ -834,82 +682,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length", "0"))
 
-        # Upload reference WAV for Chatterbox (raw body).
-        if path in ("/api/chatterbox/voice", "/voices"):
-            inactive = ensure_route_active("/api/chatterbox")
-            if inactive:
-                self._send(503, inactive.encode(), "text/plain; charset=utf-8")
-                return
-            raw = self.rfile.read(length)
-            if len(raw) < 44:
-                self._send(400, b"WAV body required", "text/plain; charset=utf-8")
-                return
-            from chatterbox_engine import REF_AUDIO, REF_DIR
-
-            REF_DIR.mkdir(parents=True, exist_ok=True)
-            REF_AUDIO.write_bytes(raw)
-            try:
-                get_chatterbox().set_reference(REF_AUDIO)
-            except Exception as exc:  # noqa: BLE001
-                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
-                return
-            self._send(
-                200,
-                json.dumps({"ok": True, "path": str(REF_AUDIO), "bytes": len(raw)}).encode(),
-                "application/json",
-            )
-            return
-
-        # DhVaani: JSON {"prompt_text": "...", "wav_b64": "..."} or raw WAV (keeps prompt.txt).
-        if path == "/api/dhvaani/voice":
-            inactive = ensure_route_active("/api/dhvaani")
-            if inactive:
-                self._send(503, inactive.encode(), "text/plain; charset=utf-8")
-                return
-            from dhvaani_engine import REF_AUDIO, REF_DIR, REF_TEXT
-
-            REF_DIR.mkdir(parents=True, exist_ok=True)
-            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-            raw = self.rfile.read(length)
-            try:
-                if ctype == "application/json":
-                    body = json.loads(raw.decode())
-                    prompt_text = str(body.get("prompt_text") or "").strip()
-                    wav_b64 = body.get("wav_b64")
-                    if wav_b64:
-                        import base64
-
-                        REF_AUDIO.write_bytes(base64.b64decode(wav_b64))
-                    if prompt_text:
-                        REF_TEXT.write_text(prompt_text + "\n", encoding="utf-8")
-                    get_dhvaani().set_reference(
-                        REF_AUDIO,
-                        prompt_text=prompt_text or None,
-                    )
-                else:
-                    if len(raw) < 44:
-                        self._send(400, b"WAV body or JSON required", "text/plain; charset=utf-8")
-                        return
-                    REF_AUDIO.write_bytes(raw)
-                    get_dhvaani().set_reference(REF_AUDIO)
-            except Exception as exc:  # noqa: BLE001
-                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
-                return
-            self._send(
-                200,
-                json.dumps(
-                    {
-                        "ok": True,
-                        "path": str(REF_AUDIO),
-                        "prompt_txt": str(REF_TEXT),
-                        "bytes": REF_AUDIO.stat().st_size if REF_AUDIO.is_file() else 0,
-                    }
-                ).encode(),
-                "application/json",
-            )
-            return
-
-        if path not in ("/api/speech", "/api/goonj", "/api/qwen", "/api/chatterbox", "/api/dhvaani"):
+        if path not in ("/api/speech", "/api/goonj"):
             self._send(404, b"Not found", "text/plain; charset=utf-8")
             return
         inactive = ensure_route_active(path)
@@ -926,33 +699,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, b"Text is required", "text/plain; charset=utf-8")
             return
         want_stream = bool(payload.get("stream"))
-
-        # Full-WAV engines — reject stream=true.
-        if want_stream and path in ("/api/chatterbox", "/api/dhvaani"):
-            self._send(
-                400,
-                b"This engine has no incremental decode; use stream=false.",
-                "text/plain; charset=utf-8",
-            )
-            return
-
-        if want_stream and path == "/api/qwen":
-            voice = str(payload.get("voice") or default_voice_for("qwen"))
-            lang = str(payload.get("language") or default_language_for("qwen"))
-            pin_err = pin_voice_error(voice) or pin_language_error(lang)
-            if pin_err:
-                self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
-                return
-            try:
-                self._send_sse(stream_qwen(text, get_qwen(), language=lang))
-            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                logger.info("SSE /api/qwen client gone")
-            except Exception as exc:  # noqa: BLE001
-                try:
-                    self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
-                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                    pass
-            return
 
         if want_stream and path == "/api/goonj":
             voice = str(payload.get("voice") or default_voice_for("goonj"))
@@ -1002,34 +748,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            if path == "/api/dhvaani":
-                voice = str(payload.get("voice") or default_voice_for("dhvaani"))
-                lang = str(payload.get("language") or default_language_for("dhvaani"))
-                pin_err = pin_voice_error(voice)
-                if pin_err:
-                    self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
-                    return
-                audio = get_dhvaani().synthesize(text, language=lang)
-                filename = "dhvaani.wav"
-            elif path == "/api/chatterbox":
-                voice = str(payload.get("voice") or default_voice_for("chatterbox"))
-                lang = str(payload.get("language") or default_language_for("chatterbox"))
-                pin_err = pin_voice_error(voice)
-                if pin_err:
-                    self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
-                    return
-                audio = get_chatterbox().synthesize(text, language=lang)
-                filename = "chatterbox.wav"
-            elif path == "/api/qwen":
-                voice = str(payload.get("voice") or default_voice_for("qwen"))
-                lang = str(payload.get("language") or default_language_for("qwen"))
-                pin_err = pin_voice_error(voice) or pin_language_error(lang)
-                if pin_err:
-                    self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
-                    return
-                audio = get_qwen().synthesize(text, language=lang)
-                filename = "qwen.wav"
-            elif path == "/api/goonj":
+            if path == "/api/goonj":
                 voice = str(payload.get("voice") or default_voice_for("goonj"))
                 lang = str(payload.get("language") or GOONJ_VOICE_LANG.get(voice, "a"))
                 pin_err = pin_voice_error(voice) or pin_language_error(lang)
@@ -1072,12 +791,6 @@ def main() -> None:
         logger.info(f"UI: {base}/")
     elif ACTIVE_TTS_MODEL == "goonj":
         logger.info(f"API: {base}/api/goonj  |  UI: {base}/goonj")
-    elif ACTIVE_TTS_MODEL == "qwen":
-        logger.info(f"API: {base}/api/qwen  (voice-clone HR ref)")
-    elif ACTIVE_TTS_MODEL == "chatterbox":
-        logger.info(f"API: {base}/api/chatterbox  |  UI: {base}/chatterbox  |  voice upload: POST /api/chatterbox/voice")
-    elif ACTIVE_TTS_MODEL == "dhvaani":
-        logger.info(f"API: {base}/api/dhvaani  |  UI: {base}/dhvaani  |  voice: POST /api/dhvaani/voice")
     ThreadingHTTPServer((UI_HOST, UI_PORT), Handler).serve_forever()
 
 

@@ -1,27 +1,19 @@
-"""Single-active TTS engine policy.
-
-AIAA-173: model/voice/language are hardcoded (no .env). Revert by checking out
-the previous branch.
-"""
+"""Single-active TTS engine policy (kokoro | goonj). Hardcoded — no .env model switch."""
 
 from __future__ import annotations
 
 import gc
-import os
 from pathlib import Path
 
 from log_config import setup_logger
 
 logger = setup_logger(__name__)
 
-KNOWN_MODELS = ("kokoro", "goonj", "qwen", "chatterbox", "dhvaani")
+KNOWN_MODELS = ("kokoro", "goonj")
 
 ROUTE_TO_MODEL = {
     "/api/speech": "kokoro",
     "/api/goonj": "goonj",
-    "/api/qwen": "qwen",
-    "/api/chatterbox": "chatterbox",
-    "/api/dhvaani": "dhvaani",
 }
 
 MODEL_TO_ROUTE = {model: route for route, model in ROUTE_TO_MODEL.items()}
@@ -29,26 +21,10 @@ MODEL_TO_ROUTE = {model: route for route, model in ROUTE_TO_MODEL.items()}
 MODEL_SAMPLE_RATE = {
     "kokoro": 24000,
     "goonj": 24000,
-    "qwen": 24000,
-    "chatterbox": 24000,
-    "dhvaani": 24000,
 }
 
-# ── Switch TTS engine here (no ACTIVE_TTS_* .env). Restart: pm2 restart tts ──
-# Keep only ONE block active; comment the others.
-# Parallel PM2: leave goonj here; start tts-dhvaani with TTS_MODEL_NAME=dhvaani.
-# MODEL_NAME = "qwen"
-# VOICE_NAME = "hr_clone"
-# LANGUAGE_NAME = "English"
-
-# MODEL_NAME = "chatterbox"
-# VOICE_NAME = "ref_clone"
-# LANGUAGE_NAME = ""  # en / hi via API
-
-# MODEL_NAME = "dhvaani"
-# VOICE_NAME = "ref_clone"
-# LANGUAGE_NAME = "hi"
-
+# ── Switch TTS engine here. Restart: pm2 restart tts ──
+# Keep only ONE block active; comment the other.
 MODEL_NAME = "goonj"
 VOICE_NAME = "en_priya"
 LANGUAGE_NAME = "a"
@@ -56,14 +32,6 @@ LANGUAGE_NAME = "a"
 # MODEL_NAME = "kokoro"
 # VOICE_NAME = "af_heart"
 # LANGUAGE_NAME = "a"
-
-# Optional override for a second PM2 process (does not touch goonj service).
-_env_model = os.environ.get("TTS_MODEL_NAME", "").strip()
-if _env_model:
-    MODEL_NAME = _env_model
-    if MODEL_NAME == "dhvaani":
-        VOICE_NAME = os.environ.get("TTS_VOICE_NAME", "ref_clone").strip() or "ref_clone"
-        LANGUAGE_NAME = os.environ.get("TTS_LANGUAGE_NAME", "hi").strip() or "hi"
 
 MODEL_ROUTE = MODEL_TO_ROUTE[MODEL_NAME]
 SAMPLE_RATE = MODEL_SAMPLE_RATE[MODEL_NAME]
@@ -150,9 +118,6 @@ def default_voice_for(model: str) -> str:
     return {
         "kokoro": "af_heart",
         "goonj": "en_priya",
-        "qwen": "hr_clone",
-        "chatterbox": "ref_clone",
-        "dhvaani": "ref_clone",
     }[model]
 
 
@@ -162,9 +127,6 @@ def default_language_for(model: str) -> str:
     return {
         "kokoro": "a",
         "goonj": "a",
-        "qwen": "English",
-        "chatterbox": "en",
-        "dhvaani": "hi",
     }[model]
 
 

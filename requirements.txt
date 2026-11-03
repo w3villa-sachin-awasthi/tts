@@ -3,21 +3,3 @@ soundfile
 colorlog>=6.8.0
 # Goonj uses the kokoro package + weights under GOONJ_MODEL_DIR
 # Jetson: keep the board CUDA torch; do not pip install desktop torch
-#
-# AIAA-173 Qwen3-TTS (voice clone) — install in the TTS venv on Jetson:
-#   pip install -U "faster-qwen3-tts" "numpy<2"
-#   # keep board torch — do NOT pip install desktop torch
-#   pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://pypi.jetson-ai-lab.io/jp6/cu126
-# Model: /data/qwen3-tts/models/0.6B-Base
-# Ref:   /data/qwen3-tts/ref/HR_VOICE.wav  (embedding cached to hr_speaker.pt)
-#
-# Chatterbox Multilingual V3 — use a SEPARATE venv (/data/chatterbox/venv):
-#   pip install torch torchaudio --index-url https://pypi.jetson-ai-lab.io/jp6/cu126
-#   pip install chatterbox-tts soundfile colorlog
-#   # if pip replaced torch, reinstall Jetson wheels again
-# Ref: /data/chatterbox/ref/voice.wav   HF: /data/chatterbox/hf-cache
-# See CHATTERBOX.md
-#
-# DhVaani-0.5 — SEPARATE venv (/data/dhvaani/venv), separate PM2 (port 8767):
-#   See DHVAANI.md
-# Ref: /data/dhvaani/ref/voice.wav + prompt.txt   HF: /data/dhvaani/hf-cache
