@@ -1,6 +1,6 @@
-"""Qwen3-TTS-12Hz-0.6B-Base voice-clone engine (Jetson-oriented).
+"""Qwen3-TTS-12Hz-0.6B-Base voice-clone via faster-qwen3-tts (Jetson).
 
-Hardcoded paths/dtype for AIAA-173. No env. Revert by checking out previous branch.
+Caches speaker embedding once; streams audio chunks during generation.
 """
 
 from __future__ import annotations
@@ -24,9 +24,12 @@ SAMPLE_RATE = 24000
 
 MODEL_DIR = Path("/data/qwen3-tts/models/0.6B-Base")
 REF_AUDIO = Path("/data/qwen3-tts/ref/HR_VOICE.wav")
+SPEAKER_PT = Path("/data/qwen3-tts/ref/hr_speaker.pt")
 DTYPE = torch.float32  # float16 often NaNs on Jetson Orin
+XVEC_ONLY = True
+STREAM_CHUNK_SIZE = 4  # ~333ms/chunk; raise to 8 if RTF < 1 on NX
 
-# Exact transcript of REF_AUDIO (HR_VOICE.wav)
+# Used only when XVEC_ONLY is False (full ICL). Exact transcript of REF_AUDIO.
 REF_TEXT = (
     "Hello, shradha! "
     "My name is srishti pandey, and I'll be your interviewer today. I hope you're doing well. "
@@ -41,12 +44,9 @@ REF_TEXT = (
     "Take your time... and feel free to answer in as much detail as you'd like."
 )
 
-# SSE chunk size (~20 ms @ 24 kHz) for LocalHttpTTS / telephony
-_CHUNK_SAMPLES = int(SAMPLE_RATE * 0.020)
-
 
 class QwenEngine:
-    """One Qwen Base checkpoint + one cached voice-clone prompt in RAM."""
+    """One FasterQwen checkpoint + one cached speaker prompt."""
 
     def __init__(self, device: str | None = None) -> None:
         if not MODEL_DIR.is_dir():
@@ -54,46 +54,66 @@ class QwenEngine:
                 f"Qwen model not found under {MODEL_DIR}. "
                 "Download Qwen/Qwen3-TTS-12Hz-0.6B-Base there first."
             )
-        if not REF_AUDIO.is_file():
-            raise FileNotFoundError(
-                f"Reference audio missing: {REF_AUDIO}. "
-                "scp your HR voice wav to that path."
-            )
 
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
         self.sample_rate = SAMPLE_RATE
         self.lock = threading.Lock()
-        self._prompt = None
 
-        from qwen_tts import Qwen3TTSModel
+        from faster_qwen3_tts import FasterQwen3TTS
 
         logger.info(
-            "Loading model_name=%s from %s device=%s dtype=%s",
+            "Loading model_name=%s from %s device=%s dtype=%s xvec_only=%s",
             MODEL_NAME,
             MODEL_DIR,
             self.device,
             DTYPE,
+            XVEC_ONLY,
         )
-        self.model = Qwen3TTSModel.from_pretrained(
+        self.model = FasterQwen3TTS.from_pretrained(
             str(MODEL_DIR),
-            device_map=self.device if self.device == "cpu" else "cuda:0",
+            device="cuda" if self.device.startswith("cuda") else self.device,
             dtype=DTYPE,
         )
+        self._prompt = self._load_or_build_prompt()
+        try:
+            self.model.warmup(prefill_len=100)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Qwen warmup skipped: %s", exc)
+        logger.info("Qwen voice-clone ready (voice_name=%s)", VOICE_NAME)
+
+    def _load_or_build_prompt(self):
+        if XVEC_ONLY and SPEAKER_PT.is_file():
+            logger.info("Loading cached speaker embedding %s", SPEAKER_PT)
+            spk = torch.load(SPEAKER_PT, map_location="cpu", weights_only=True)
+            return {"ref_spk_embedding": [spk.to(self.device)]}
+
+        if not REF_AUDIO.is_file():
+            raise FileNotFoundError(
+                f"Reference audio missing: {REF_AUDIO}. "
+                f"scp HR voice wav there, or provide {SPEAKER_PT}."
+            )
+
         logger.info(
-            "Building voice-clone prompt ref=%s text_chars=%d",
+            "Extracting voice prompt ref=%s xvec_only=%s",
             REF_AUDIO,
-            len(REF_TEXT),
+            XVEC_ONLY,
         )
-        self._prompt = self.model.create_voice_clone_prompt(
+        items = self.model.model.create_voice_clone_prompt(
             ref_audio=str(REF_AUDIO),
-            ref_text=REF_TEXT,
+            ref_text="" if XVEC_ONLY else REF_TEXT,
+            x_vector_only_mode=XVEC_ONLY,
         )
-        logger.info("Qwen voice-clone prompt ready (voice_name=%s)", VOICE_NAME)
+        if XVEC_ONLY:
+            spk = items[0].ref_spk_embedding.detach().cpu()
+            SPEAKER_PT.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(spk, SPEAKER_PT)
+            logger.info("Saved speaker embedding %s", SPEAKER_PT)
+            return {"ref_spk_embedding": [spk.to(self.device)]}
+        return items
 
     def warm(self, _voice: str | None = None) -> None:
-        # Model + prompt already built in __init__.
         return
 
     def synthesize_array(self, text: str, language: str | None = None) -> np.ndarray:
@@ -103,6 +123,7 @@ class QwenEngine:
                 text=text,
                 language=lang,
                 voice_clone_prompt=self._prompt,
+                xvec_only=XVEC_ONLY,
             )
         audio = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
         if int(sr) != self.sample_rate:
@@ -111,12 +132,21 @@ class QwenEngine:
         return audio
 
     def iter_audio(self, text: str, language: str | None = None):
-        """Yield float32 PCM chunks (pseudo-stream after full generate)."""
-        audio = self.synthesize_array(text, language=language)
-        if audio.size == 0:
-            return
-        for start in range(0, audio.size, _CHUNK_SAMPLES):
-            yield audio[start : start + _CHUNK_SAMPLES]
+        """Yield float32 PCM chunks as they are generated."""
+        lang = (language or LANGUAGE_NAME).strip() or LANGUAGE_NAME
+        with self.lock:
+            for audio_chunk, sr, _timing in self.model.generate_voice_clone_streaming(
+                text=text,
+                language=lang,
+                voice_clone_prompt=self._prompt,
+                xvec_only=XVEC_ONLY,
+                chunk_size=STREAM_CHUNK_SIZE,
+            ):
+                if int(sr) != self.sample_rate:
+                    self.sample_rate = int(sr)
+                chunk = np.asarray(audio_chunk, dtype=np.float32).reshape(-1)
+                if chunk.size:
+                    yield chunk
 
     def synthesize(self, text: str, language: str | None = None) -> bytes:
         audio = self.synthesize_array(text, language=language)

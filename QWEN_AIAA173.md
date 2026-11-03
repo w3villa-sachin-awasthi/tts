@@ -14,15 +14,18 @@ Hardcoded in code (no `.env`):
 
 | Path | Purpose |
 |------|---------|
-| `/data/qwen3-tts/models/0.6B-Base` | Qwen 0.6B-Base weights |
-| `/data/qwen3-tts/ref/HR_VOICE.wav` | HR reference clip |
-| `REF_TEXT` in `qwen_engine.py` | Exact transcript of `HR_VOICE.wav` (hardcoded) |
+| `/data/qwen3-tts/models/0.6B-Base` | Qwen 0.6B-Base weights (reuse; do not re-download) |
+| `/data/qwen3-tts/ref/HR_VOICE.wav` | HR reference clip (used once to build embedding) |
+| `/data/qwen3-tts/ref/hr_speaker.pt` | Cached x-vector (auto-created on first start) |
+
+Engine: `faster-qwen3-tts` (CUDA graphs + true streaming). Voice prompt is extracted once; per-request generation reuses `hr_speaker.pt`.
 
 ## Run
 
-TTS process needs Jetson torch 2.8 + torchaudio 2.8 + `qwen-tts` + `numpy<2`.
-
 ```bash
+# TTS venv — do not overwrite Jetson torch
+pip install -U "faster-qwen3-tts" "numpy<2"
+
 pm2 restart tts
 pm2 restart inbound-agent outbound-agent
 curl -s http://127.0.0.1:8765/api/active
