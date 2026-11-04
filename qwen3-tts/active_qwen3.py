@@ -15,11 +15,10 @@ TTS_PORT = 8766
 ROUTE = "/api/qwen3"
 MODEL_NAME = "qwen3"
 VOICE_NAME = "clone"
-LANGUAGE_NAME = "hindi"
+LANGUAGE_NAME = "English"
 SAMPLE_RATE = 24000
 
 # ── Paths (Jetson after TRT download) ──────────────────────────────
-# Untar/HF clone Base TRT bundle here (NOT CustomVoice):
 TRT_ROOT = ROOT / "trt" / "qwen3-tts-base-trt"
 
 WORKER = TRT_ROOT / "jv-workers" / "qwen3_tts_streaming_worker"
@@ -37,7 +36,11 @@ EXTRACT_SCRIPT = TRT_ROOT / "scripts" / "extract_speaker_embedding.py"
 REF_PATH = ROOT / "ref" / "speaker.wav"
 EMBED_PATH = ROOT / "cache" / "speaker_emb.b64"
 
-# Streaming knobs — smoother playback (less crowded / glitchy)
+# TRT generate once (no mid-utt vocoder splits), then SSE in even pieces.
+# stream=False → smoother audio; SSE_OUT_CHUNK = ~200ms @ 24kHz for LiveKit.
+TRT_STREAM = False
+SSE_OUT_CHUNK = 4800
+TALKER_TEMPERATURE = 0.7
+# Used only if TRT_STREAM=True (legacy):
 FIRST_CHUNK_FRAMES = 6
 CHUNK_FRAMES = 10
-TALKER_TEMPERATURE = 0.7

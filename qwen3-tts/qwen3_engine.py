@@ -1,4 +1,7 @@
-"""Qwen3-TTS Base via Jetson TensorRT streaming worker + cached speaker embed."""
+"""Qwen3-TTS Base via Jetson TensorRT worker + cached speaker embed.
+
+Default: full utterance from TRT, then even SSE chunks (smooth playback).
+"""
 
 from __future__ import annotations
 
@@ -30,9 +33,11 @@ from active_qwen3 import (
     PLUGIN,
     REF_PATH,
     SAMPLE_RATE,
+    SSE_OUT_CHUNK,
     TALKER_DIR,
     TALKER_TEMPERATURE,
     TOKENIZER_DIR,
+    TRT_STREAM,
     WORKER,
 )
 
@@ -64,7 +69,7 @@ def normalize_language(lang: str | None) -> str:
 
 
 class Qwen3Engine:
-    """Long-lived TRT streaming worker; speaker_emb.b64 loaded once."""
+    """Long-lived TRT worker; speaker_emb.b64 loaded once."""
 
     def __init__(self) -> None:
         self.sample_rate = SAMPLE_RATE
@@ -110,7 +115,6 @@ class Qwen3Engine:
             env=env,
         )
         assert self._proc.stdout is not None
-        # Wait until worker is ready (JSON line or plain "ready")
         while True:
             line = self._proc.stdout.readline()
             if not line:
@@ -131,7 +135,7 @@ class Qwen3Engine:
         path = Path(path or self.prompt_path)
         if not path.is_file():
             raise FileNotFoundError(
-                f"Missing speaker embed: {path}. Run: python extract_embed.py"
+                f"Missing speaker embed: {path}. Run extract for ref/speaker.wav"
             )
         self._emb_b64 = path.read_text(encoding="utf-8").strip()
         self.prompt_path = path
@@ -147,11 +151,45 @@ class Qwen3Engine:
         with self.lock:
             self.ensure_embed()
 
+    def _read_pcm_until_done(self, proc: subprocess.Popen[str]) -> np.ndarray:
+        assert proc.stdout is not None
+        parts: list[np.ndarray] = []
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                raise RuntimeError("TRT worker closed stdout mid-request")
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning("TRT non-json: %s", line[:160])
+                continue
+
+            et = ev.get("event") or ev.get("type") or ""
+            if et == "chunk":
+                b64 = ev.get("audio_b64") or ev.get("b64") or ""
+                if not b64:
+                    continue
+                pcm = np.frombuffer(base64.b64decode(b64), dtype=np.int16)
+                if pcm.size:
+                    parts.append(pcm)
+            elif et in ("done", "end"):
+                break
+            elif et == "error":
+                raise RuntimeError(ev.get("message") or line)
+
+        if not parts:
+            return np.zeros(0, dtype=np.float32)
+        wav = np.concatenate(parts).astype(np.float32) / 32768.0
+        return wav
+
     def iter_audio(self, text: str, language: str | None = None) -> Iterator[np.ndarray]:
         text = (text or "").strip()
         if not text:
             return
-        _ = normalize_language(language or LANGUAGE_NAME)
+        lang = normalize_language(language or LANGUAGE_NAME)
         with self.lock:
             emb = self.ensure_embed()
             proc = self._proc
@@ -160,42 +198,36 @@ class Qwen3Engine:
             if proc.poll() is not None:
                 raise RuntimeError(f"TRT worker died exit={proc.returncode}")
 
-            req = {
+            req: dict = {
                 "id": str(uuid.uuid4()),
                 "text": text,
+                "language": lang,
                 "speaker_embedding_b64": emb,
-                "stream": True,
-                "chunk_frames": CHUNK_FRAMES,
-                "first_chunk_frames": FIRST_CHUNK_FRAMES,
+                "stream": bool(TRT_STREAM),
                 "talker_temperature": TALKER_TEMPERATURE,
                 "chunk_format": "pcm_s16le",
                 "chunk_transport": "base64",
             }
+            if TRT_STREAM:
+                req["chunk_frames"] = CHUNK_FRAMES
+                req["first_chunk_frames"] = FIRST_CHUNK_FRAMES
+
+            logger.info(
+                "TRT synth stream=%s lang=%s chars=%d",
+                TRT_STREAM,
+                lang,
+                len(text),
+            )
             proc.stdin.write(json.dumps(req, separators=(",", ":")) + "\n")
             proc.stdin.flush()
 
-            while True:
-                line = proc.stdout.readline()
-                if not line:
-                    raise RuntimeError("TRT worker closed stdout mid-request")
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    ev = json.loads(line)
-                except json.JSONDecodeError:
-                    logger.warning("TRT non-json: %s", line[:160])
-                    continue
+            wav = self._read_pcm_until_done(proc)
+            if wav.size == 0:
+                return
 
-                et = ev.get("event") or ev.get("type") or ""
-                if et == "chunk":
-                    b64 = ev.get("audio_b64") or ev.get("b64") or ""
-                    if not b64:
-                        continue
-                    pcm = np.frombuffer(base64.b64decode(b64), dtype=np.int16)
-                    if pcm.size:
-                        yield pcm.astype(np.float32) / 32768.0
-                elif et in ("done", "end"):
-                    break
-                elif et == "error":
-                    raise RuntimeError(ev.get("message") or line)
+            # Even SSE pieces for LiveKit (avoids bursty/gap playback).
+            step = max(int(SSE_OUT_CHUNK), 1)
+            for i in range(0, wav.size, step):
+                piece = wav[i : i + step]
+                if piece.size:
+                    yield piece
