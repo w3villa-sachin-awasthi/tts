@@ -1,6 +1,7 @@
 """Qwen3-TTS Base via Jetson TensorRT worker + cached speaker embed.
 
-Default: full utterance from TRT, then even SSE chunks (smooth playback).
+Worker streams PCM; we buffer the full utterance then emit even SSE chunks
+so LiveKit does not see bursty/gapty frame timing.
 """
 
 from __future__ import annotations
@@ -37,7 +38,6 @@ from active_qwen3 import (
     TALKER_DIR,
     TALKER_TEMPERATURE,
     TOKENIZER_DIR,
-    TRT_STREAM,
     WORKER,
 )
 
@@ -176,14 +176,19 @@ class Qwen3Engine:
                 if pcm.size:
                     parts.append(pcm)
             elif et in ("done", "end"):
+                # some builds attach final audio on done
+                b64 = ev.get("audio_b64") or ev.get("b64") or ""
+                if b64:
+                    pcm = np.frombuffer(base64.b64decode(b64), dtype=np.int16)
+                    if pcm.size:
+                        parts.append(pcm)
                 break
             elif et == "error":
                 raise RuntimeError(ev.get("message") or line)
 
         if not parts:
             return np.zeros(0, dtype=np.float32)
-        wav = np.concatenate(parts).astype(np.float32) / 32768.0
-        return wav
+        return np.concatenate(parts).astype(np.float32) / 32768.0
 
     def iter_audio(self, text: str, language: str | None = None) -> Iterator[np.ndarray]:
         text = (text or "").strip()
@@ -198,34 +203,27 @@ class Qwen3Engine:
             if proc.poll() is not None:
                 raise RuntimeError(f"TRT worker died exit={proc.returncode}")
 
-            req: dict = {
+            req = {
                 "id": str(uuid.uuid4()),
                 "text": text,
                 "language": lang,
                 "speaker_embedding_b64": emb,
-                "stream": bool(TRT_STREAM),
+                "stream": True,
+                "chunk_frames": CHUNK_FRAMES,
+                "first_chunk_frames": FIRST_CHUNK_FRAMES,
                 "talker_temperature": TALKER_TEMPERATURE,
                 "chunk_format": "pcm_s16le",
                 "chunk_transport": "base64",
             }
-            if TRT_STREAM:
-                req["chunk_frames"] = CHUNK_FRAMES
-                req["first_chunk_frames"] = FIRST_CHUNK_FRAMES
-
-            logger.info(
-                "TRT synth stream=%s lang=%s chars=%d",
-                TRT_STREAM,
-                lang,
-                len(text),
-            )
+            logger.info("TRT synth lang=%s chars=%d (buffer then even SSE)", lang, len(text))
             proc.stdin.write(json.dumps(req, separators=(",", ":")) + "\n")
             proc.stdin.flush()
 
             wav = self._read_pcm_until_done(proc)
             if wav.size == 0:
+                logger.error("TRT returned empty audio for text=%r", text[:80])
                 return
 
-            # Even SSE pieces for LiveKit (avoids bursty/gap playback).
             step = max(int(SSE_OUT_CHUNK), 1)
             for i in range(0, wav.size, step):
                 piece = wav[i : i + step]

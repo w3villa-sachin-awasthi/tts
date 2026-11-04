@@ -36,11 +36,9 @@ EXTRACT_SCRIPT = TRT_ROOT / "scripts" / "extract_speaker_embedding.py"
 REF_PATH = ROOT / "ref" / "speaker.wav"
 EMBED_PATH = ROOT / "cache" / "speaker_emb.b64"
 
-# TRT generate once (no mid-utt vocoder splits), then SSE in even pieces.
-# stream=False → smoother audio; SSE_OUT_CHUNK = ~200ms @ 24kHz for LiveKit.
-TRT_STREAM = False
-SSE_OUT_CHUNK = 4800
-TALKER_TEMPERATURE = 0.7
-# Used only if TRT_STREAM=True (legacy):
+# Worker must use stream=true (stream=false returns no audio on this bundle).
+# We still buffer the full wav, then SSE in even pieces for smoother LiveKit play.
 FIRST_CHUNK_FRAMES = 6
 CHUNK_FRAMES = 10
+TALKER_TEMPERATURE = 0.7
+SSE_OUT_CHUNK = 4800  # ~200ms @ 24kHz
