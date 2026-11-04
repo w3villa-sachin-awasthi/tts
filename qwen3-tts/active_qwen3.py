@@ -37,7 +37,7 @@ EXTRACT_SCRIPT = TRT_ROOT / "scripts" / "extract_speaker_embedding.py"
 REF_PATH = ROOT / "ref" / "speaker.wav"
 EMBED_PATH = ROOT / "cache" / "speaker_emb.b64"
 
-# Streaming knobs (HF Jetson Base worker defaults)
-FIRST_CHUNK_FRAMES = 4
-CHUNK_FRAMES = 13
-TALKER_TEMPERATURE = 0.9
+# Streaming knobs — smoother playback (less crowded / glitchy)
+FIRST_CHUNK_FRAMES = 6
+CHUNK_FRAMES = 10
+TALKER_TEMPERATURE = 0.7
