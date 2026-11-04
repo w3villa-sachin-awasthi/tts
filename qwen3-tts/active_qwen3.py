@@ -15,7 +15,7 @@ TTS_PORT = 8766
 ROUTE = "/api/qwen3"
 MODEL_NAME = "qwen3"
 VOICE_NAME = "clone"
-LANGUAGE_NAME = "English"
+LANGUAGE_NAME = "hindi"
 SAMPLE_RATE = 24000
 
 # ── Paths (Jetson after TRT download) ──────────────────────────────
