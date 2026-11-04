@@ -1,0 +1,7 @@
+# Install Jetson torch separately (see SETUP notes), then:
+qwen-tts
+soundfile
+numpy
+colorlog>=6.8.0
+# Optional faster attention on CUDA:
+# flash-attn
