@@ -1,13 +1,8 @@
-"""Single-active TTS engine policy.
-
-Only ACTIVE_TTS_MODEL is loaded into RAM. Switch by changing env and restarting
-(e.g. pm2 restart tts --update-env).
-"""
+"""Single-active TTS engine policy (kokoro | goonj). Hardcoded — no .env model switch."""
 
 from __future__ import annotations
 
 import gc
-import os
 from pathlib import Path
 
 from log_config import setup_logger
@@ -28,32 +23,42 @@ MODEL_SAMPLE_RATE = {
     "goonj": 24000,
 }
 
+# ── Switch TTS engine here. Restart: pm2 restart tts ──
+# Keep only ONE block active; comment the other.
+MODEL_NAME = "goonj"
+VOICE_NAME = "en_priya"
+LANGUAGE_NAME = "a"
 
-def _env(name: str, default: str = "") -> str:
-    return (os.environ.get(name) or default).strip()
+# MODEL_NAME = "kokoro"
+# VOICE_NAME = "af_heart"
+# LANGUAGE_NAME = "a"
 
+MODEL_ROUTE = MODEL_TO_ROUTE[MODEL_NAME]
+SAMPLE_RATE = MODEL_SAMPLE_RATE[MODEL_NAME]
 
-def resolve_active_model() -> str:
-    raw = _env("ACTIVE_TTS_MODEL", "goonj").lower()
-    if raw not in KNOWN_MODELS:
-        raise SystemExit(
-            f"ACTIVE_TTS_MODEL={raw!r} is invalid. Use one of: {', '.join(KNOWN_MODELS)}"
-        )
-    return raw
+if MODEL_NAME not in KNOWN_MODELS:
+    raise SystemExit(
+        f"MODEL_NAME={MODEL_NAME!r} is invalid. Use one of: {', '.join(KNOWN_MODELS)}"
+    )
 
+ACTIVE_TTS_MODEL = MODEL_NAME
+ACTIVE_TTS_VOICE = VOICE_NAME
+ACTIVE_TTS_LANGUAGE = LANGUAGE_NAME
 
-ACTIVE_TTS_MODEL = resolve_active_model()
-ACTIVE_TTS_VOICE = _env("ACTIVE_TTS_VOICE")
-ACTIVE_TTS_LANGUAGE = _env("ACTIVE_TTS_LANGUAGE")
+logger.info(
+    "Active TTS hardcoded model_name=%s voice_name=%s language_name=%s route=%s",
+    MODEL_NAME,
+    VOICE_NAME,
+    LANGUAGE_NAME,
+    MODEL_ROUTE,
+)
 
 
 def inactive_message(requested: str) -> str:
     return (
         f"Engine {requested!r} is not active. "
-        f"ACTIVE_TTS_MODEL={ACTIVE_TTS_MODEL!r}. "
-        f"Only the active engine is in RAM. "
-        f"Set ACTIVE_TTS_MODEL={requested} (and matching voice/language), "
-        f"then restart TTS: pm2 restart tts --update-env"
+        f"MODEL_NAME={ACTIVE_TTS_MODEL!r}. "
+        f"Only the active engine is in RAM on this branch."
     )
 
 
@@ -70,8 +75,7 @@ def ensure_route_active(path: str) -> str | None:
 def pin_voice_error(voice: str) -> str | None:
     if ACTIVE_TTS_VOICE and voice != ACTIVE_TTS_VOICE:
         return (
-            f"Voice {voice!r} is not the pinned ACTIVE_TTS_VOICE={ACTIVE_TTS_VOICE!r}. "
-            "Change ACTIVE_TTS_VOICE and restart TTS to switch (keeps one voice in RAM)."
+            f"Voice {voice!r} is not the pinned VOICE_NAME={ACTIVE_TTS_VOICE!r}."
         )
     return None
 
@@ -79,8 +83,7 @@ def pin_voice_error(voice: str) -> str | None:
 def pin_language_error(lang: str) -> str | None:
     if ACTIVE_TTS_LANGUAGE and lang != ACTIVE_TTS_LANGUAGE:
         return (
-            f"Language {lang!r} is not the pinned ACTIVE_TTS_LANGUAGE={ACTIVE_TTS_LANGUAGE!r}. "
-            "Change ACTIVE_TTS_LANGUAGE and restart TTS to switch."
+            f"Language {lang!r} is not the pinned LANGUAGE_NAME={ACTIVE_TTS_LANGUAGE!r}."
         )
     return None
 
@@ -129,8 +132,10 @@ def default_language_for(model: str) -> str:
 
 def write_env_hint(root: Path) -> str:
     return (
-        f"ACTIVE_TTS_MODEL={ACTIVE_TTS_MODEL} "
-        f"ACTIVE_TTS_VOICE={ACTIVE_TTS_VOICE or '(any for this engine)'} "
-        f"ACTIVE_TTS_LANGUAGE={ACTIVE_TTS_LANGUAGE or '(any for this engine)'} "
+        f"MODEL_NAME={ACTIVE_TTS_MODEL} "
+        f"VOICE_NAME={ACTIVE_TTS_VOICE} "
+        f"LANGUAGE_NAME={ACTIVE_TTS_LANGUAGE} "
+        f"MODEL_ROUTE={MODEL_ROUTE} "
+        f"SAMPLE_RATE={SAMPLE_RATE} "
         f"models_dir={root / 'models'}"
     )

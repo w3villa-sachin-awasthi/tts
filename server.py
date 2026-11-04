@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local TTS app. One ACTIVE_TTS_MODEL in RAM (kokoro or goonj)."""
+"""Local TTS app. One ACTIVE_TTS_MODEL in RAM (kokoro | goonj)."""
 
 from __future__ import annotations
 
@@ -579,9 +579,22 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
-        for chunk in events:
-            self.wfile.write(chunk)
-            self.wfile.flush()
+        try:
+            for chunk in events:
+                try:
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as exc:
+                    logger.info("SSE client disconnected (%s); stopping generation", exc)
+                    close = getattr(events, "close", None)
+                    if callable(close):
+                        close()
+                    return
+        except GeneratorExit:
+            return
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as exc:
+            logger.info("SSE client disconnected during stream (%s)", exc)
+            return
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
@@ -590,6 +603,27 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/goonj":
             self._send(200, render_page("goonj"), "text/html; charset=utf-8")
+            return
+        if path == "/health":
+            cuda_ok = False
+            try:
+                import torch
+
+                cuda_ok = bool(torch.cuda.is_available())
+            except Exception:
+                pass
+            loaded = (
+                (ACTIVE_TTS_MODEL == "goonj" and _goonj is not None)
+                or (ACTIVE_TTS_MODEL == "kokoro" and _kokoro_model is not None)
+            )
+            payload = {
+                "ok": True,
+                "active_model": ACTIVE_TTS_MODEL,
+                "device": DEVICE,
+                "cuda": cuda_ok,
+                "loaded": loaded,
+            }
+            self._send(200, json.dumps(payload).encode(), "application/json")
             return
         if path == "/api/models":
             catalog_by_id = {
@@ -624,8 +658,8 @@ class Handler(BaseHTTPRequestHandler):
                 "active_route": MODEL_TO_ROUTE[ACTIVE_TTS_MODEL],
                 "active_sample_rate": MODEL_SAMPLE_RATE[ACTIVE_TTS_MODEL],
                 "policy": (
-                    "Only ACTIVE_TTS_MODEL is loaded into RAM (kokoro or goonj). "
-                    "Change ACTIVE_TTS_* in /data/tts/.env then: pm2 restart tts --update-env"
+                    "Only MODEL_NAME is loaded into RAM. "
+                    "Model is hardcoded in active_tts.py (MODEL_NAME); not .env."
                 ),
                 "models": models,
             }
@@ -647,6 +681,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length", "0"))
+
         if path not in ("/api/speech", "/api/goonj"):
             self._send(404, b"Not found", "text/plain; charset=utf-8")
             return
@@ -674,8 +709,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 self._send_sse(stream_goonj(text, voice, get_goonj(), GOONJ_SPEED))
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                logger.info("SSE /api/goonj client gone")
             except Exception as exc:  # noqa: BLE001
-                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+                try:
+                    self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass
             return
 
         if want_stream and path == "/api/speech":
@@ -698,8 +738,13 @@ class Handler(BaseHTTPRequestHandler):
                         KOKORO_SPLIT,
                     )
                 )
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                logger.info("SSE /api/speech client gone")
             except Exception as exc:  # noqa: BLE001
-                self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+                try:
+                    self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass
             return
 
         try:
