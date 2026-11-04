@@ -1,7 +1,6 @@
-# Install Jetson torch separately (see SETUP notes), then:
-qwen-tts
-soundfile
+# TRT path needs no qwen-tts / torch for the hot path (C++ worker).
+# extract_embed.py uses the bundle script + onnxruntime if present.
 numpy
+soundfile
 colorlog>=6.8.0
-# Optional faster attention on CUDA:
-# flash-attn
+onnxruntime

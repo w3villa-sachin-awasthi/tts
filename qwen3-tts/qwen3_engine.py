@@ -1,41 +1,45 @@
-"""Qwen3-TTS Base voice clone — prompt built once, cached, reused."""
+"""Qwen3-TTS Base via Jetson TensorRT streaming worker + cached speaker embed."""
 
 from __future__ import annotations
 
+import base64
+import json
+import os
+import subprocess
 import sys
 import threading
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
-import torch
 
-# Reuse parent TTS logger (log_config.py lives in /data/tts).
 _PARENT = Path(__file__).resolve().parent.parent
 if str(_PARENT) not in sys.path:
-    sys.path.append(str(_PARENT))  # append — do not shadow local modules
-
+    sys.path.append(str(_PARENT))
 
 from log_config import setup_logger
 
 from active_qwen3 import (
+    CHUNK_FRAMES,
+    CODE2WAV_DIR,
+    CP_DIR,
+    EMBED_PATH,
+    FIRST_CHUNK_FRAMES,
     LANGUAGE_NAME,
-    MODEL_ID,
-    PROMPT_PATH,
+    PLUGIN,
     REF_PATH,
-    REF_TEXT,
     SAMPLE_RATE,
-    X_VECTOR_ONLY,
+    TALKER_DIR,
+    TALKER_TEMPERATURE,
+    TOKENIZER_DIR,
+    WORKER,
 )
 
 logger = setup_logger(__name__)
 
-# Yield size when model has no native stream API (~200 ms @ 24 kHz).
-FALLBACK_CHUNK = 4800
-
 LANG_MAP = {
     "a": "English",
-    "b": "English",
     "en": "English",
     "english": "English",
     "h": "Hindi",
@@ -45,152 +49,153 @@ LANG_MAP = {
 }
 
 
-def default_model_id() -> str:
-    return MODEL_ID
-
-
-def default_prompt_path() -> Path:
-    return Path(PROMPT_PATH)
-
-
 def default_ref_path() -> Path:
     return Path(REF_PATH)
+
+
+def default_embed_path() -> Path:
+    return Path(EMBED_PATH)
 
 
 def normalize_language(lang: str | None) -> str:
     if not lang:
         return LANGUAGE_NAME
-    key = lang.strip().lower()
-    return LANG_MAP.get(key, lang.strip())
+    return LANG_MAP.get(lang.strip().lower(), lang.strip())
 
 
 class Qwen3Engine:
-    """One Base checkpoint + one cached voice_clone_prompt in RAM."""
+    """Long-lived TRT streaming worker; speaker_emb.b64 loaded once."""
 
-    def __init__(self, device: str | None = None) -> None:
-        from qwen_tts import Qwen3TTSModel
-
-        self.model_id = default_model_id()
-        self.prompt_path = default_prompt_path()
+    def __init__(self) -> None:
         self.sample_rate = SAMPLE_RATE
+        self.device = "trt"
+        self.model_id = str(TALKER_DIR)
+        self.prompt_path = default_embed_path()
         self.lock = threading.Lock()
-        self._prompt = None
+        self._emb_b64: str | None = None
+        self._proc: subprocess.Popen[str] | None = None
+        self._start_worker()
 
-        if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.device = device
+    def _start_worker(self) -> None:
+        if not WORKER.is_file():
+            raise FileNotFoundError(
+                f"TRT worker missing: {WORKER}\n"
+                "Download Base Jetson TRT bundle into trt/qwen3-tts-base-trt/"
+            )
+        for p in (TALKER_DIR, CP_DIR, CODE2WAV_DIR, TOKENIZER_DIR, PLUGIN):
+            if not Path(p).exists():
+                raise FileNotFoundError(f"Missing TRT path: {p}")
 
-        dtype = torch.bfloat16 if self.device.startswith("cuda") else torch.float32
-        kwargs: dict = {
-            "device_map": self.device if self.device == "cpu" else "cuda:0",
-            "dtype": dtype,
-        }
-        try:
-            import flash_attn  # noqa: F401
+        env = os.environ.copy()
+        env["EDGELLM_PLUGIN_PATH"] = str(PLUGIN)
+        cuda = "/usr/local/cuda/lib64"
+        prev = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = f"{cuda}:{prev}" if prev else cuda
 
-            kwargs["attn_implementation"] = "flash_attention_2"
-        except Exception:
-            pass
-
-        logger.info("Loading Qwen3-TTS model_id=%s device=%s", self.model_id, self.device)
-        self.model = Qwen3TTSModel.from_pretrained(self.model_id, **kwargs)
-        self.sample_rate = int(
-            getattr(self.model, "sample_rate", None)
-            or getattr(getattr(self.model, "model", None), "sample_rate", SAMPLE_RATE)
-            or SAMPLE_RATE
+        cmd = [
+            str(WORKER),
+            f"--talkerEngineDir={TALKER_DIR}",
+            f"--codePredictorEngineDir={CP_DIR}",
+            f"--code2wavEngineDir={CODE2WAV_DIR}",
+            f"--tokenizerDir={TOKENIZER_DIR}",
+        ]
+        logger.info("Starting TRT worker: %s", " ".join(cmd))
+        self._proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
         )
-        logger.info("Qwen3-TTS loaded sample_rate=%s", self.sample_rate)
+        assert self._proc.stdout is not None
+        # Wait until worker is ready (JSON line or plain "ready")
+        while True:
+            line = self._proc.stdout.readline()
+            if not line:
+                raise RuntimeError("TRT worker exited before ready")
+            line = line.strip()
+            logger.info("TRT worker: %s", line[:200])
+            low = line.lower()
+            if "ready" in low:
+                break
+            try:
+                obj = json.loads(line)
+                if obj.get("event") == "ready" or obj.get("status") == "ready":
+                    break
+            except json.JSONDecodeError:
+                pass
 
-    def build_prompt(
-        self,
-        ref_audio: str | Path | None = None,
-        ref_text: str | None = None,
-        *,
-        x_vector_only: bool | None = None,
-        save_path: Path | None = None,
-    ):
-        """Extract clone features once from reference audio and save."""
-        ref_audio = str(ref_audio or default_ref_path())
-        if x_vector_only is None:
-            x_vector_only = X_VECTOR_ONLY
-        if ref_text is None:
-            ref_text = REF_TEXT
-
-        kwargs: dict = {
-            "ref_audio": ref_audio,
-            "x_vector_only_mode": x_vector_only,
-        }
-        if not x_vector_only:
-            if not (ref_text or "").strip():
-                raise ValueError(
-                    "REF_TEXT required when X_VECTOR_ONLY=False (edit active_qwen3.py)"
-                )
-            kwargs["ref_text"] = ref_text.strip()
-
-        items = self.model.create_voice_clone_prompt(**kwargs)
-        out = Path(save_path or self.prompt_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(items, out)
-        self._prompt = items
-        self.prompt_path = out
-        logger.info(
-            "Voice clone prompt saved path=%s x_vector_only=%s",
-            out,
-            x_vector_only,
-        )
-        return items
-
-    def load_prompt(self, path: Path | None = None):
+    def load_embed(self, path: Path | None = None) -> str:
         path = Path(path or self.prompt_path)
         if not path.is_file():
             raise FileNotFoundError(
-                f"Missing voice clone prompt: {path}. "
-                "Run: python extract_embed.py"
+                f"Missing speaker embed: {path}. Run: python extract_embed.py"
             )
-        self._prompt = torch.load(path, map_location="cpu", weights_only=False)
+        self._emb_b64 = path.read_text(encoding="utf-8").strip()
         self.prompt_path = path
-        logger.info("Voice clone prompt loaded path=%s", path)
-        return self._prompt
+        logger.info("Speaker embed loaded path=%s bytes=%d", path, len(self._emb_b64))
+        return self._emb_b64
 
-    def ensure_prompt(self):
-        if self._prompt is not None:
-            return self._prompt
-        return self.load_prompt()
+    def ensure_embed(self) -> str:
+        if self._emb_b64:
+            return self._emb_b64
+        return self.load_embed()
 
     def warm(self) -> None:
         with self.lock:
-            self.ensure_prompt()
+            self.ensure_embed()
 
     def iter_audio(self, text: str, language: str | None = None) -> Iterator[np.ndarray]:
         text = (text or "").strip()
         if not text:
             return
-        lang = normalize_language(language or LANGUAGE_NAME)
+        _ = normalize_language(language or LANGUAGE_NAME)
         with self.lock:
-            prompt = self.ensure_prompt()
-            stream_fn = getattr(self.model, "stream_generate_voice_clone", None)
-            if callable(stream_fn):
-                for chunk, sr in stream_fn(
-                    text=text,
-                    language=lang,
-                    voice_clone_prompt=prompt,
-                ):
-                    if sr:
-                        self.sample_rate = int(sr)
-                    audio = np.asarray(chunk, dtype=np.float32).reshape(-1)
-                    if audio.size:
-                        yield audio
-                return
+            emb = self.ensure_embed()
+            proc = self._proc
+            if proc is None or proc.stdin is None or proc.stdout is None:
+                raise RuntimeError("TRT worker not running")
+            if proc.poll() is not None:
+                raise RuntimeError(f"TRT worker died exit={proc.returncode}")
 
-            wavs, sr = self.model.generate_voice_clone(
-                text=text,
-                language=lang,
-                voice_clone_prompt=prompt,
-            )
-            if sr:
-                self.sample_rate = int(sr)
-            wav = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
-            for i in range(0, wav.size, FALLBACK_CHUNK):
-                piece = wav[i : i + FALLBACK_CHUNK]
-                if piece.size:
-                    yield piece
+            req = {
+                "id": str(uuid.uuid4()),
+                "text": text,
+                "speaker_embedding_b64": emb,
+                "stream": True,
+                "chunk_frames": CHUNK_FRAMES,
+                "first_chunk_frames": FIRST_CHUNK_FRAMES,
+                "talker_temperature": TALKER_TEMPERATURE,
+                "chunk_format": "pcm_s16le",
+                "chunk_transport": "base64",
+            }
+            proc.stdin.write(json.dumps(req, separators=(",", ":")) + "\n")
+            proc.stdin.flush()
+
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    raise RuntimeError("TRT worker closed stdout mid-request")
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.warning("TRT non-json: %s", line[:160])
+                    continue
+
+                et = ev.get("event") or ev.get("type") or ""
+                if et == "chunk":
+                    b64 = ev.get("audio_b64") or ev.get("b64") or ""
+                    if not b64:
+                        continue
+                    pcm = np.frombuffer(base64.b64decode(b64), dtype=np.int16)
+                    if pcm.size:
+                        yield pcm.astype(np.float32) / 32768.0
+                elif et in ("done", "end"):
+                    break
+                elif et == "error":
+                    raise RuntimeError(ev.get("message") or line)

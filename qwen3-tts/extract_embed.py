@@ -1,32 +1,50 @@
 #!/usr/bin/env python3
-"""Build voice_clone_prompt once from ref in active_qwen3.py → cache/."""
+"""Extract speaker embedding once (TRT ONNX / bundle script) → cache/speaker_emb.b64."""
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
-from active_qwen3 import PROMPT_PATH, REF_PATH, REF_TEXT, X_VECTOR_ONLY
-from qwen3_engine import Qwen3Engine
+from active_qwen3 import (
+    EMBED_PATH,
+    EXTRACT_SCRIPT,
+    REF_PATH,
+    SPEAKER_ENCODER_ONNX,
+)
 
 
 def main() -> None:
     ref = Path(REF_PATH)
-    out = Path(PROMPT_PATH)
-    if not ref.is_file():
-        raise SystemExit(
-            f"Reference audio not found: {ref}\n"
-            "Put your 15s wav there, or edit REF_PATH in active_qwen3.py"
-        )
+    out = Path(EMBED_PATH)
+    onnx = Path(SPEAKER_ENCODER_ONNX)
+    script = Path(EXTRACT_SCRIPT)
 
-    engine = Qwen3Engine()
-    engine.build_prompt(
-        ref,
-        ref_text=REF_TEXT or None,
-        x_vector_only=X_VECTOR_ONLY,
-        save_path=out,
-    )
-    print(f"OK prompt saved -> {out}")
-    print(f"X_VECTOR_ONLY={X_VECTOR_ONLY}")
+    if not ref.is_file():
+        raise SystemExit(f"Reference audio not found: {ref}")
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    if script.is_file() and onnx.is_file():
+        subprocess.check_call(
+            [sys.executable, str(script), str(ref), str(onnx), str(out)],
+        )
+        print(f"OK embed saved -> {out}")
+        return
+
+    if not onnx.is_file():
+        raise SystemExit(
+            f"Missing speaker encoder ONNX: {onnx}\n"
+            "After TRT download, set SPEAKER_ENCODER_ONNX in active_qwen3.py "
+            "to the bundle's speaker_encoder.onnx path."
+        )
+    if not script.is_file():
+        raise SystemExit(
+            f"Missing extract script: {script}\n"
+            "Copy scripts/extract_speaker_embedding.py from the TRT bundle, "
+            "or set EXTRACT_SCRIPT in active_qwen3.py."
+        )
 
 
 if __name__ == "__main__":

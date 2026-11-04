@@ -1,7 +1,6 @@
-"""Hardcoded Qwen3-TTS settings — edit here; no .env.
+"""Hardcoded Qwen3-TTS TRT settings — edit here; no .env.
 
 Restart: pm2 restart tts-qwen3
-To remove this stack later: delete tts/qwen3-tts + pm2 delete tts-qwen3.
 """
 
 from __future__ import annotations
@@ -10,26 +9,35 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
-# ── Switch / pin here ──────────────────────────────────────────────
+# ── Server ─────────────────────────────────────────────────────────
 TTS_HOST = "127.0.0.1"
 TTS_PORT = 8766
-
-# HF id OR local folder with Base weights (0.6B for Jetson):
-MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
-# MODEL_ID = str(ROOT / "models" / "Qwen3-TTS-12Hz-0.6B-Base")
-
-VOICE_NAME = "clone"
-LANGUAGE_NAME = "Auto"  # Auto | English | Hindi
-SAMPLE_RATE = 24000
-
-REF_PATH = ROOT / "ref" / "speaker.wav"
-PROMPT_PATH = ROOT / "cache" / "voice_clone_prompt.pt"
-
-# True = speaker embed only (no transcript). False = ICL (needs REF_TEXT).
-X_VECTOR_ONLY = True
-REF_TEXT = ""
-# REF_TEXT = "exact transcript of speaker.wav"
-# X_VECTOR_ONLY = False
-
 ROUTE = "/api/qwen3"
 MODEL_NAME = "qwen3"
+VOICE_NAME = "clone"
+LANGUAGE_NAME = "English"
+SAMPLE_RATE = 24000
+
+# ── Paths (Jetson after TRT download) ──────────────────────────────
+# Untar/HF clone Base TRT bundle here (NOT CustomVoice):
+TRT_ROOT = ROOT / "trt" / "qwen3-tts-base-trt"
+
+WORKER = TRT_ROOT / "jv-workers" / "qwen3_tts_streaming_worker"
+PLUGIN = TRT_ROOT / "jv-workers" / "libNvInfer_edgellm_plugin.so"
+
+MODEL_DIR = TRT_ROOT / "models" / "qwen3-tts-base"
+TALKER_DIR = MODEL_DIR / "engines" / "talker"
+CP_DIR = MODEL_DIR / "engines" / "code_predictor"
+CODE2WAV_DIR = MODEL_DIR / "engines" / "code2wav"
+TOKENIZER_DIR = TALKER_DIR
+
+SPEAKER_ENCODER_ONNX = MODEL_DIR / "onnx" / "speaker_encoder.onnx"
+EXTRACT_SCRIPT = TRT_ROOT / "scripts" / "extract_speaker_embedding.py"
+
+REF_PATH = ROOT / "ref" / "speaker.wav"
+EMBED_PATH = ROOT / "cache" / "speaker_emb.b64"
+
+# Streaming knobs (HF Jetson Base worker defaults)
+FIRST_CHUNK_FRAMES = 4
+CHUNK_FRAMES = 13
+TALKER_TEMPERATURE = 0.9

@@ -22,10 +22,11 @@ if str(_PARENT) not in sys.path:
 from log_config import setup_logger
 
 from active_qwen3 import (
+    EMBED_PATH,
     LANGUAGE_NAME,
-    MODEL_ID,
     MODEL_NAME,
     ROUTE,
+    TALKER_DIR,
     TTS_HOST,
     TTS_PORT,
     VOICE_NAME,
@@ -81,8 +82,8 @@ class Handler(BaseHTTPRequestHandler):
                 "route": ROUTE,
                 "sample_rate": eng.sample_rate,
                 "device": eng.device,
-                "prompt_path": str(eng.prompt_path),
-                "model_id": MODEL_ID,
+                "embed_path": str(EMBED_PATH),
+                "talker_dir": str(TALKER_DIR),
             }
             self._send(200, json.dumps(payload).encode(), "application/json")
             return
