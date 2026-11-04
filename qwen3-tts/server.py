@@ -13,10 +13,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 _PARENT = ROOT.parent
-if str(_PARENT) not in sys.path:
-    sys.path.insert(0, str(_PARENT))
+# Local package first; parent only for log_config (append, never shadow).
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(_PARENT) not in sys.path:
+    sys.path.append(str(_PARENT))
 
 from log_config import setup_logger
 
@@ -30,7 +31,7 @@ from active_qwen3 import (
     VOICE_NAME,
 )
 from qwen3_engine import Qwen3Engine, normalize_language
-from tts_stream import stream_qwen3
+from qwen3_stream import stream_qwen3
 
 logger = setup_logger(__name__)
 

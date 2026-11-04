@@ -13,7 +13,8 @@ import torch
 # Reuse parent TTS logger (log_config.py lives in /data/tts).
 _PARENT = Path(__file__).resolve().parent.parent
 if str(_PARENT) not in sys.path:
-    sys.path.insert(0, str(_PARENT))
+    sys.path.append(str(_PARENT))  # append — do not shadow local modules
+
 
 from log_config import setup_logger
 
