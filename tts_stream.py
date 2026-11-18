@@ -1,4 +1,4 @@
-"""Server-Sent Events streaming for Kokoro and Goonj (float32 PCM chunks)."""
+"""Server-Sent Events streaming for Kokoro, Goonj, and Mithi (float32 PCM chunks)."""
 
 from __future__ import annotations
 
@@ -70,5 +70,23 @@ def stream_goonj(text: str, voice: str, goonj, speed: float = 1.0) -> Iterator[b
         return
     if count == 0:
         yield sse_bytes("error", {"message": "Goonj returned no audio."})
+        return
+    yield sse_bytes("end", {"chunks": count, "sample_rate": rate})
+
+
+def stream_mithi(text: str, voice: str, lang: str, mithi) -> Iterator[bytes]:
+    """Pseudo-stream: Mithi synthesizes fully, then emits float32 SSE chunks."""
+    rate = int(getattr(mithi, "sample_rate", 24000) or 24000)
+    yield sse_bytes("meta", {"model": "mithi", "sample_rate": rate, "format": "f32le"})
+    count = 0
+    try:
+        for audio in mithi.iter_audio(text, voice, lang=lang):
+            count += 1
+            yield sse_bytes("chunk", encode_f32_chunk(audio))
+    except Exception as exc:  # noqa: BLE001
+        yield sse_bytes("error", {"message": str(exc)})
+        return
+    if count == 0:
+        yield sse_bytes("error", {"message": "Mithi returned no audio."})
         return
     yield sse_bytes("end", {"chunks": count, "sample_rate": rate})

@@ -1,5 +1,15 @@
 kokoro>=0.9.4
 soundfile
 colorlog>=6.8.0
+numpy
 # Goonj uses the kokoro package + weights under GOONJ_MODEL_DIR
+# Mithi (Oomni/mithi-v2-flash) needs transformers + weights under MITHI_MODEL_DIR
+# Prefer the same deps already installed for voice-assistant-test:
+#   transformers>=4.40.0 safetensors sentencepiece scipy
+#   pip install "misaki[en]>=0.9.4" "espeakng-loader>=0.2.4" "phonemizer-fork>=3.3.2" "spacy>=3.8"
+#   python -m spacy download en_core_web_sm
 # Jetson: keep the board CUDA torch; do not pip install desktop torch
+transformers>=4.40.0
+safetensors>=0.4.0
+sentencepiece>=0.2.0
+scipy>=1.11.0

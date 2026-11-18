@@ -1,4 +1,4 @@
-"""Single-active TTS engine policy (kokoro | goonj). Hardcoded — no .env model switch."""
+"""Single-active TTS engine policy (kokoro | goonj | mithi). Hardcoded — no .env model switch."""
 
 from __future__ import annotations
 
@@ -9,11 +9,12 @@ from log_config import setup_logger
 
 logger = setup_logger(__name__)
 
-KNOWN_MODELS = ("kokoro", "goonj")
+KNOWN_MODELS = ("kokoro", "goonj", "mithi")
 
 ROUTE_TO_MODEL = {
     "/api/speech": "kokoro",
     "/api/goonj": "goonj",
+    "/api/mithi": "mithi",
 }
 
 MODEL_TO_ROUTE = {model: route for route, model in ROUTE_TO_MODEL.items()}
@@ -21,17 +22,23 @@ MODEL_TO_ROUTE = {model: route for route, model in ROUTE_TO_MODEL.items()}
 MODEL_SAMPLE_RATE = {
     "kokoro": 24000,
     "goonj": 24000,
+    "mithi": 24000,
 }
 
 # ── Switch TTS engine here. Restart: pm2 restart tts ──
-# Keep only ONE block active; comment the other.
-MODEL_NAME = "goonj"
-VOICE_NAME = "en_priya"
-LANGUAGE_NAME = "a"
+# Keep only ONE block active; comment the others.
+
+# MODEL_NAME = "goonj"
+# VOICE_NAME = "en_priya"
+# LANGUAGE_NAME = "a"
 
 # MODEL_NAME = "kokoro"
 # VOICE_NAME = "af_heart"
 # LANGUAGE_NAME = "a"
+
+MODEL_NAME = "mithi"
+VOICE_NAME = "ahana"
+LANGUAGE_NAME = "en"
 
 MODEL_ROUTE = MODEL_TO_ROUTE[MODEL_NAME]
 SAMPLE_RATE = MODEL_SAMPLE_RATE[MODEL_NAME]
@@ -118,6 +125,7 @@ def default_voice_for(model: str) -> str:
     return {
         "kokoro": "af_heart",
         "goonj": "en_priya",
+        "mithi": "ahana",
     }[model]
 
 
@@ -127,6 +135,7 @@ def default_language_for(model: str) -> str:
     return {
         "kokoro": "a",
         "goonj": "a",
+        "mithi": "en",
     }[model]
 
 

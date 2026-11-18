@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Kokoro/Goonj SSE streaming against a running server."""
+"""Verify Kokoro/Goonj/Mithi SSE streaming against a running server."""
 
 from __future__ import annotations
 
@@ -65,7 +65,14 @@ def main() -> None:
     # Active engine only responds 200; the other returns 503 — test goonj by default.
     active = json.loads(urllib.request.urlopen(base + "/api/active", timeout=30).read())
     model = active.get("active_model")
-    if model == "goonj":
+    if model == "mithi":
+        check_model(
+            base,
+            "/api/mithi",
+            {"input": "Streaming test.", "voice": "ahana", "language": "en"},
+            "Mithi",
+        )
+    elif model == "goonj":
         check_model(
             base,
             "/api/goonj",

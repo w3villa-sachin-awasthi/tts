@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local TTS app. One ACTIVE_TTS_MODEL in RAM (kokoro | goonj)."""
+"""Local TTS app. One ACTIVE_TTS_MODEL in RAM (kokoro | goonj | mithi)."""
 
 from __future__ import annotations
 
@@ -62,7 +62,8 @@ from active_tts import (
     write_env_hint,
 )
 from goonj_engine import GOONJ_VOICES, VOICE_LANG as GOONJ_VOICE_LANG
-from tts_stream import stream_goonj, stream_kokoro
+from mithi_engine import MITHI_LANGS, MITHI_VOICES
+from tts_stream import stream_goonj, stream_kokoro, stream_mithi
 
 LANGUAGES = [
     (
@@ -165,7 +166,7 @@ VOICE_LANG = {
     voice["id"]: item["code"] for item in CATALOG for voice in item["voices"]
 }
 
-DEVICE = detect_device() if ACTIVE_TTS_MODEL in ("kokoro", "goonj") else "cpu"
+DEVICE = detect_device() if ACTIVE_TTS_MODEL in ("kokoro", "goonj", "mithi") else "cpu"
 pipelines: dict[str, object] = {}
 _kokoro_model = None
 pipeline_lock = threading.Lock()
@@ -173,6 +174,21 @@ KOKORO_SPEED = float(os.environ.get("KOKORO_SPEED", "1.0"))
 KOKORO_SPLIT = r"[.!?।]\s+"
 GOONJ_SPEED = float(os.environ.get("GOONJ_SPEED", os.environ.get("KOKORO_SPEED", "1.0")))
 _goonj = None
+_mithi = None
+
+_MITHI_LANG_NAMES = {
+    "en": "English",
+    "hi": "Hindi",
+    "bn": "Bengali",
+    "gu": "Gujarati",
+    "kn": "Kannada",
+    "ml": "Malayalam",
+    "mr": "Marathi",
+    "or": "Odia",
+    "pa": "Punjabi",
+    "ta": "Tamil",
+    "te": "Telugu",
+}
 
 GOONJ_LANG = [
     {
@@ -195,6 +211,15 @@ GOONJ_LANG = [
     },
 ]
 
+MITHI_LANG = [
+    {
+        "code": code,
+        "name": _MITHI_LANG_NAMES.get(code, code),
+        "voices": [{"id": v, "label": v.title()} for v in MITHI_VOICES],
+    }
+    for code in MITHI_LANGS
+]
+
 MODELS = [
     {
         "id": "kokoro",
@@ -212,6 +237,14 @@ MODELS = [
         "streaming": True,
         "languages": GOONJ_LANG,
     },
+    {
+        "id": "mithi",
+        "name": "Mithi v2 Flash",
+        "route": "/api/mithi",
+        "note": "Oomni/mithi-v2-flash. Pseudo-stream SSE. Set MITHI_MODEL_DIR.",
+        "streaming": True,
+        "languages": MITHI_LANG,
+    },
 ]
 
 
@@ -225,6 +258,18 @@ def get_goonj():
         DEVICE = detect_device()
         _goonj = GoonjEngine(DEVICE)
     return _goonj
+
+
+def get_mithi():
+    global _mithi, DEVICE
+    if ACTIVE_TTS_MODEL != "mithi":
+        raise RuntimeError(inactive_message("mithi"))
+    if _mithi is None:
+        from mithi_engine import MithiEngine
+
+        DEVICE = detect_device()
+        _mithi = MithiEngine(DEVICE)
+    return _mithi
 
 
 def pipeline_for(lang: str):
@@ -260,6 +305,9 @@ def preload_active_engine() -> None:
     elif ACTIVE_TTS_MODEL == "goonj":
         logger.info(f"Preloading Goonj voice={voice} on {detect_device()}…")
         get_goonj().warm(voice)
+    elif ACTIVE_TTS_MODEL == "mithi":
+        logger.info(f"Preloading Mithi lang={lang} voice={voice} on {detect_device()}…")
+        get_mithi().warm(voice, lang=lang)
 
 
 def synthesize(text: str, voice: str, lang: str) -> bytes:
@@ -408,8 +456,9 @@ PAGE = """<!DOCTYPE html>
     const samples = {
       kokoro: "Hello from Kokoro on this Mac.",
       goonj: "Hello, thank you for calling. Your appointment is confirmed.",
+      mithi: "Hello, thank you for calling. Your appointment is confirmed.",
     };
-    const paths = { kokoro: "/", goonj: "/goonj" };
+    const paths = { kokoro: "/", goonj: "/goonj", mithi: "/mithi" };
 
     function syncStreamToggle() {
       const canStream = !!currentModel().streaming;
@@ -604,6 +653,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/goonj":
             self._send(200, render_page("goonj"), "text/html; charset=utf-8")
             return
+        if path == "/mithi":
+            self._send(200, render_page("mithi"), "text/html; charset=utf-8")
+            return
         if path == "/health":
             cuda_ok = False
             try:
@@ -615,6 +667,7 @@ class Handler(BaseHTTPRequestHandler):
             loaded = (
                 (ACTIVE_TTS_MODEL == "goonj" and _goonj is not None)
                 or (ACTIVE_TTS_MODEL == "kokoro" and _kokoro_model is not None)
+                or (ACTIVE_TTS_MODEL == "mithi" and _mithi is not None)
             )
             payload = {
                 "ok": True,
@@ -642,6 +695,14 @@ class Handler(BaseHTTPRequestHandler):
                     "sample_rate": 24000,
                     "streaming": True,
                     "languages": GOONJ_LANG,
+                },
+                "mithi": {
+                    "id": "mithi",
+                    "repo": "Oomni/mithi-v2-flash",
+                    "route": "/api/mithi",
+                    "sample_rate": 24000,
+                    "streaming": True,
+                    "languages": MITHI_LANG,
                 },
             }
             models = []
@@ -682,7 +743,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length", "0"))
 
-        if path not in ("/api/speech", "/api/goonj"):
+        if path not in ("/api/speech", "/api/goonj", "/api/mithi"):
             self._send(404, b"Not found", "text/plain; charset=utf-8")
             return
         inactive = ensure_route_active(path)
@@ -699,6 +760,24 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, b"Text is required", "text/plain; charset=utf-8")
             return
         want_stream = bool(payload.get("stream"))
+
+        if want_stream and path == "/api/mithi":
+            voice = str(payload.get("voice") or default_voice_for("mithi"))
+            lang = str(payload.get("language") or default_language_for("mithi"))
+            pin_err = pin_voice_error(voice) or pin_language_error(lang)
+            if pin_err:
+                self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                return
+            try:
+                self._send_sse(stream_mithi(text, voice, lang, get_mithi()))
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                logger.info("SSE /api/mithi client gone")
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    self._send(500, str(exc).encode(), "text/plain; charset=utf-8")
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass
+            return
 
         if want_stream and path == "/api/goonj":
             voice = str(payload.get("voice") or default_voice_for("goonj"))
@@ -748,7 +827,16 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            if path == "/api/goonj":
+            if path == "/api/mithi":
+                voice = str(payload.get("voice") or default_voice_for("mithi"))
+                lang = str(payload.get("language") or default_language_for("mithi"))
+                pin_err = pin_voice_error(voice) or pin_language_error(lang)
+                if pin_err:
+                    self._send(400, pin_err.encode(), "text/plain; charset=utf-8")
+                    return
+                audio = get_mithi().synthesize(text, voice, lang=lang)
+                filename = "mithi.wav"
+            elif path == "/api/goonj":
                 voice = str(payload.get("voice") or default_voice_for("goonj"))
                 lang = str(payload.get("language") or GOONJ_VOICE_LANG.get(voice, "a"))
                 pin_err = pin_voice_error(voice) or pin_language_error(lang)
@@ -791,6 +879,8 @@ def main() -> None:
         logger.info(f"UI: {base}/")
     elif ACTIVE_TTS_MODEL == "goonj":
         logger.info(f"API: {base}/api/goonj  |  UI: {base}/goonj")
+    elif ACTIVE_TTS_MODEL == "mithi":
+        logger.info(f"API: {base}/api/mithi  |  UI: {base}/mithi")
     ThreadingHTTPServer((UI_HOST, UI_PORT), Handler).serve_forever()
 
 
