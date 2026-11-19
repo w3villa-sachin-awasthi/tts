@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from log_config import setup_logger
+from ws_proto import accept_key, recv_text as ws_recv, send_text as ws_send
 
 logger = setup_logger(__name__)
 
@@ -596,8 +597,90 @@ class Handler(BaseHTTPRequestHandler):
             logger.info("SSE client disconnected during stream (%s)", exc)
             return
 
+    def _ws_upgrade(self) -> bool:
+        key = self.headers.get("Sec-WebSocket-Key")
+        if not key:
+            self._send(400, b"Missing Sec-WebSocket-Key", "text/plain; charset=utf-8")
+            return False
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept_key(key))
+        self.end_headers()
+        return True
+
+    def _handle_tts_ws(self, path: str) -> None:
+        """Phrases in (JSON), audio out (SSE-shaped text frames)."""
+        inactive = ensure_route_active(path.removesuffix("/ws"))
+        if inactive:
+            self._send(503, inactive.encode(), "text/plain; charset=utf-8")
+            return
+        if not self._ws_upgrade():
+            return
+        is_goonj = path.startswith("/api/goonj")
+        voice = default_voice_for("goonj" if is_goonj else "kokoro")
+        lang = default_language_for("goonj" if is_goonj else "kokoro")
+        try:
+            while True:
+                raw = ws_recv(self.rfile)
+                if raw is None:
+                    break
+                if not raw:
+                    continue
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    ws_send(self.wfile, 'event: error\ndata: {"message":"Invalid JSON"}\n\n')
+                    continue
+                if msg.get("end"):
+                    break
+                if msg.get("voice"):
+                    voice = str(msg["voice"])
+                if msg.get("language"):
+                    lang = str(msg["language"])
+                text = str(msg.get("input", "")).strip()
+                if not text:
+                    continue
+                pin_err = pin_voice_error(voice) or pin_language_error(lang)
+                if pin_err:
+                    ws_send(
+                        self.wfile,
+                        f"event: error\ndata: {json.dumps({'message': pin_err})}\n\n",
+                    )
+                    continue
+                try:
+                    events = (
+                        stream_goonj(text, voice, get_goonj(), GOONJ_SPEED)
+                        if is_goonj
+                        else stream_kokoro(
+                            text,
+                            voice,
+                            lang,
+                            pipeline_for,
+                            pipeline_lock,
+                            VOICE_LANG,
+                            KOKORO_SPEED,
+                            KOKORO_SPLIT,
+                        )
+                    )
+                    for chunk in events:
+                        ws_send(self.wfile, chunk.decode("utf-8"))
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    logger.info("WS %s client gone", path)
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    ws_send(
+                        self.wfile,
+                        f"event: error\ndata: {json.dumps({'message': str(exc)})}\n\n",
+                    )
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            logger.info("WS %s closed", path)
+
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
+        if path in ("/api/goonj/ws", "/api/speech/ws"):
+            self._handle_tts_ws(path)
+            return
         if path in ("/", "/index.html", "/kokoro"):
             self._send(200, render_page("kokoro"), "text/html; charset=utf-8")
             return
@@ -790,7 +873,7 @@ def main() -> None:
     if ACTIVE_TTS_MODEL == "kokoro":
         logger.info(f"UI: {base}/")
     elif ACTIVE_TTS_MODEL == "goonj":
-        logger.info(f"API: {base}/api/goonj  |  UI: {base}/goonj")
+        logger.info(f"API: {base}/api/goonj  |  WS: {base}/api/goonj/ws  |  UI: {base}/goonj")
     ThreadingHTTPServer((UI_HOST, UI_PORT), Handler).serve_forever()
 
 
