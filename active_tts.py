@@ -26,7 +26,7 @@ MODEL_SAMPLE_RATE = {
 # ── Switch TTS engine here. Restart: pm2 restart tts ──
 # Keep only ONE block active; comment the other.
 MODEL_NAME = "goonj"
-VOICE_NAME = "en_priya"
+VOICE_NAME = "en_ananya"
 LANGUAGE_NAME = "a"
 
 # MODEL_NAME = "kokoro"
