@@ -1,7 +1,12 @@
 models/
 output/
 __pycache__/
+*.py[cod]
+*.pyo
 *.wav
 .DS_Store
 .venv/
+.env
 nemo-speech/
+vendor/
+.gitignore

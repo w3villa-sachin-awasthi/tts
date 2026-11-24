@@ -8,7 +8,7 @@ from collections.abc import Iterator
 
 import numpy as np
 
-from log_config import setup_logger
+from common.log_config import setup_logger
 
 logger = setup_logger(__name__)
 

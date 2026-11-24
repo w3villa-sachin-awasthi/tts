@@ -11,7 +11,7 @@ import numpy as np
 import soundfile as sf
 import torch
 
-from log_config import setup_logger
+from common.log_config import setup_logger
 
 logger = setup_logger(__name__)
 
@@ -54,7 +54,7 @@ def default_model_dir() -> Path:
     # Jetson layout used in trials; fall back to repo-local models/
     for candidate in (
         Path("/data/goonj/models/goonj-1-82M"),
-        Path(__file__).resolve().parent / "models" / "goonj-1-82M",
+        Path(__file__).resolve().parents[1] / "models" / "goonj-1-82M",
     ):
         if (candidate / "kokoro_hindi_final.pth").is_file():
             return candidate

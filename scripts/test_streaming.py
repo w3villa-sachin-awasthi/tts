@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from log_config import setup_logger
+from common.log_config import setup_logger
 
 logger = setup_logger(__name__)
 

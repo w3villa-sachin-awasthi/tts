@@ -10,7 +10,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from log_config import setup_logger
+from common.log_config import setup_logger
 
 logger = setup_logger(__name__)
 
@@ -61,8 +61,8 @@ from active_tts import (
     pin_voice_error,
     write_env_hint,
 )
-from goonj_engine import GOONJ_VOICES, VOICE_LANG as GOONJ_VOICE_LANG
-from tts_stream import stream_goonj, stream_kokoro
+from engines.goonj import GOONJ_VOICES, VOICE_LANG as GOONJ_VOICE_LANG
+from engines.stream import stream_goonj, stream_kokoro
 
 LANGUAGES = [
     (
@@ -220,7 +220,7 @@ def get_goonj():
     if ACTIVE_TTS_MODEL != "goonj":
         raise RuntimeError(inactive_message("goonj"))
     if _goonj is None:
-        from goonj_engine import GoonjEngine
+        from engines.goonj import GoonjEngine
 
         DEVICE = detect_device()
         _goonj = GoonjEngine(DEVICE)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import gc
 from pathlib import Path
 
-from log_config import setup_logger
+from common.log_config import setup_logger
 
 logger = setup_logger(__name__)
 
